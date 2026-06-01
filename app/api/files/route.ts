@@ -18,6 +18,13 @@ const s3 = new S3Client({
   },
 });
 
+console.log('REGION:', process.env.MY_AWS_REGION);
+console.log('KEY_ID present:', !!process.env.MY_AWS_ACCESS_KEY_ID);
+console.log('KEY_ID length:', (process.env.MY_AWS_ACCESS_KEY_ID || '').length);
+console.log('SECRET present:', !!process.env.MY_AWS_SECRET_ACCESS_KEY);
+console.log('SECRET length:', (process.env.MY_AWS_SECRET_ACCESS_KEY || '').length);
+console.log('BUCKET:', process.env.S3_RAW_BUCKET);
+
 export async function GET() {
   try {
     const files: Array<{
