@@ -7,11 +7,17 @@ import { NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import * as XLSX from 'xlsx';
 
-const REGION = process.env.AWS_REGION || 'us-east-1';
+const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
-const MAX_ROWS = 500; // cap how many rows we send to the browser
+const MAX_ROWS = 500;
 
-const s3 = new S3Client({ region: REGION });
+const s3 = new S3Client({
+  region: REGION,
+  credentials: {
+    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY!,
+  },
+});
 
 async function streamToBuffer(stream: ReadableStream<Uint8Array> | any): Promise<Buffer> {
   const chunks: Uint8Array[] = [];
