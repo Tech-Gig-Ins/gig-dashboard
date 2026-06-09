@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 
 type FileRow = {
   key: string;
@@ -15,6 +15,25 @@ type FileContent = {
   totalRows: number;
   sheetName?: string;
 };
+
+type SearchMatch = {
+  fileKey: string;
+  filename: string;
+  system: string;
+  headers: string[];
+  rows: string[][];
+  matchedColumns: string[];
+};
+
+type SearchResponse = {
+  query: string;
+  filesScanned: number;
+  filesWithMatches: number;
+  totalMatches: number;
+  results: SearchMatch[];
+};
+
+type TabKey = 'master' | 'all-info' | 'consultant';
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -36,70 +55,56 @@ const MONTH_LOOKUP: Record<string, number> = {
   dec: 11, december: 11,
 };
 
-// Detect month/year from a filename. Returns { year, month } where month is 0-11.
-// Returns null if no date detected.
 function detectMonthYear(filename: string): { year: number; month: number } | null {
   const lower = filename.toLowerCase();
 
-  // Pattern 1: Month name followed by 4-digit year (e.g., "April_2026", "April 2026", "april-2026")
+  // 4-digit year after month name
   const monthNamePattern = /(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[\s_\-]*(\d{4})/i;
   const m1 = lower.match(monthNamePattern);
   if (m1) {
     const monthKey = m1[1].toLowerCase();
     const year = parseInt(m1[2], 10);
     const month = MONTH_LOOKUP[monthKey];
-    if (month !== undefined && year >= 2020 && year <= 2099) {
-      return { year, month };
-    }
+    if (month !== undefined && year >= 2020 && year <= 2099) return { year, month };
   }
 
-  // Pattern 1b: Month name followed by 2-digit year (e.g., "March 26", "March26", "April 25")
-  // Interpreted as 20YY
+  // 2-digit year after month name
   const monthShortYearPattern = /(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[\s_\-]*(\d{2})(?!\d)/i;
   const m1b = lower.match(monthShortYearPattern);
   if (m1b) {
     const monthKey = m1b[1].toLowerCase();
     const yy = parseInt(m1b[2], 10);
     const month = MONTH_LOOKUP[monthKey];
-    // Treat as 20YY (so "26" → 2026)
     const year = 2000 + yy;
-    if (month !== undefined && yy >= 20 && yy <= 99) {
-      return { year, month };
-    }
+    if (month !== undefined && yy >= 20 && yy <= 99) return { year, month };
   }
 
-  // Pattern 2: MM-DD-YYYY or MM_DD_YYYY or MM/DD/YYYY (e.g., "05-25-2026")
+  // MM-DD-YYYY
   const usDatePattern = /(\d{1,2})[\-_\/](\d{1,2})[\-_\/](\d{4})/;
   const m2 = filename.match(usDatePattern);
   if (m2) {
     const month = parseInt(m2[1], 10) - 1;
     const year = parseInt(m2[3], 10);
-    if (month >= 0 && month <= 11 && year >= 2020 && year <= 2099) {
-      return { year, month };
-    }
+    if (month >= 0 && month <= 11 && year >= 2020 && year <= 2099) return { year, month };
   }
 
-  // Pattern 3: YYYYMMDD (e.g., "20260315")
+  // YYYYMMDD
   const isoPattern = /(\d{8})/;
   const m3 = filename.match(isoPattern);
   if (m3) {
     const s = m3[1];
     const year = parseInt(s.slice(0, 4), 10);
     const month = parseInt(s.slice(4, 6), 10) - 1;
-    if (year >= 2020 && year <= 2099 && month >= 0 && month <= 11) {
-      return { year, month };
-    }
+    if (year >= 2020 && year <= 2099 && month >= 0 && month <= 11) return { year, month };
   }
 
-  // Pattern 4: YYYY-MM-DD
+  // YYYY-MM-DD
   const isoDashPattern = /(\d{4})-(\d{1,2})-(\d{1,2})/;
   const m4 = filename.match(isoDashPattern);
   if (m4) {
     const year = parseInt(m4[1], 10);
     const month = parseInt(m4[2], 10) - 1;
-    if (year >= 2020 && year <= 2099 && month >= 0 && month <= 11) {
-      return { year, month };
-    }
+    if (year >= 2020 && year <= 2099 && month >= 0 && month <= 11) return { year, month };
   }
 
   return null;
@@ -138,7 +143,6 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-// Build a 2-level grouping: month → system → files
 type DoubleGrouped = {
   [monthKey: string]: {
     label: string;
@@ -150,16 +154,11 @@ type DoubleGrouped = {
 
 function groupFiles(files: FileRow[]): DoubleGrouped {
   const result: DoubleGrouped = {};
-
   for (const file of files) {
-    // Detect system from S3 key
     const sysMatch = file.key.match(/^carrier=([^/]+)\//);
     const system = sysMatch ? sysMatch[1] : 'unknown';
-
-    // Detect month from filename, fallback to lastModified date
     const detected = detectMonthYear(file.filename);
     let year: number, month: number, label: string, mKey: string;
-
     if (detected) {
       year = detected.year;
       month = detected.month;
@@ -172,17 +171,27 @@ function groupFiles(files: FileRow[]): DoubleGrouped {
       label = `${monthLabel(year, month)} (from upload date)`;
       mKey = `unknown-${monthKey(year, month)}`;
     }
-
-    if (!result[mKey]) {
-      result[mKey] = { label, year, month, systems: {} };
-    }
-    if (!result[mKey].systems[system]) {
-      result[mKey].systems[system] = [];
-    }
+    if (!result[mKey]) result[mKey] = { label, year, month, systems: {} };
+    if (!result[mKey].systems[system]) result[mKey].systems[system] = [];
     result[mKey].systems[system].push(file);
   }
-
   return result;
+}
+
+// Highlight matched portion of text in a cell
+function highlight(text: string, query: string): React.ReactNode {
+  if (!query) return text;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark style={{ background: 'rgba(255, 220, 100, 0.4)', color: '#fff', padding: '0 2px', borderRadius: '3px' }}>
+        {text.slice(idx, idx + query.length)}
+      </mark>
+      {text.slice(idx + query.length)}
+    </>
+  );
 }
 
 export default function Dashboard() {
@@ -192,29 +201,37 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [totalFiles, setTotalFiles] = useState(0);
 
+  const [activeTab, setActiveTab] = useState<TabKey>('all-info');
+
   const [selectedFile, setSelectedFile] = useState<FileRow | null>(null);
   const [fileContent, setFileContent] = useState<FileContent | null>(null);
   const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState<string | null>(null);
 
+  // Search state
+  const [searchInput, setSearchInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResponse | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     setMounted(true);
-
-    async function fetchFiles() {
-      try {
-        const res = await fetch('/api/files');
+    fetch('/api/files')
+      .then((res) => {
         if (!res.ok) throw new Error(`API returned ${res.status}`);
-        const data: FileRow[] = await res.json();
+        return res.json();
+      })
+      .then((data: FileRow[]) => {
         setGrouped(groupFiles(data));
         setTotalFiles(data.length);
         setLoading(false);
-      } catch (e: any) {
+      })
+      .catch((e: any) => {
         setError(e.message || 'Failed to load files');
         setLoading(false);
-      }
-    }
-
-    fetchFiles();
+      });
   }, []);
 
   async function loadFileContent(file: FileRow) {
@@ -222,7 +239,6 @@ export default function Dashboard() {
     setFileContent(null);
     setContentError(null);
     setContentLoading(true);
-
     try {
       const res = await fetch(`/api/file-content?key=${encodeURIComponent(file.key)}`);
       if (!res.ok) {
@@ -238,7 +254,42 @@ export default function Dashboard() {
     }
   }
 
-  // Sort month keys: newest first, "unknown-*" keys at the bottom
+  // Debounced search: wait 500ms after typing stops, then search
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (searchInput.trim().length < 2) {
+      setSearchQuery('');
+      setSearchResults(null);
+      setSearchError(null);
+      return;
+    }
+    debounceRef.current = setTimeout(() => {
+      setSearchQuery(searchInput.trim());
+    }, 500);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [searchInput]);
+
+  useEffect(() => {
+    if (!searchQuery) return;
+    setSearching(true);
+    setSearchError(null);
+    fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`Search failed: ${res.status}`);
+        return res.json();
+      })
+      .then((data: SearchResponse) => {
+        setSearchResults(data);
+        setSearching(false);
+      })
+      .catch((e: any) => {
+        setSearchError(e.message || 'Search failed');
+        setSearching(false);
+      });
+  }, [searchQuery]);
+
   const sortedMonthKeys = Object.keys(grouped).sort((a, b) => {
     const aUnknown = a.startsWith('unknown-');
     const bUnknown = b.startsWith('unknown-');
@@ -348,7 +399,7 @@ export default function Dashboard() {
         .hero {
           position: relative;
           z-index: 10;
-          padding: 100px 56px 60px;
+          padding: 80px 56px 40px;
           max-width: 1400px;
           margin: 0 auto;
         }
@@ -358,7 +409,7 @@ export default function Dashboard() {
           letter-spacing: 0.3em;
           text-transform: uppercase;
           color: #6ba4ff;
-          margin-bottom: 32px;
+          margin-bottom: 24px;
           opacity: 0;
           transform: translateY(20px);
           animation: ${mounted ? 'fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards' : 'none'};
@@ -366,7 +417,7 @@ export default function Dashboard() {
 
         .title {
           font-family: 'Fraunces', serif;
-          font-size: clamp(48px, 7vw, 88px);
+          font-size: clamp(40px, 6vw, 72px);
           font-weight: 500;
           letter-spacing: -0.03em;
           line-height: 0.95;
@@ -383,91 +434,170 @@ export default function Dashboard() {
           font-weight: 400;
         }
 
-        .subtitle {
-          font-size: 17px;
-          color: rgba(255, 255, 255, 0.55);
-          margin: 32px 0 0;
-          max-width: 540px;
-          line-height: 1.6;
-          opacity: 0;
-          transform: translateY(20px);
-          animation: ${mounted ? 'fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.5s forwards' : 'none'};
-        }
-
         @keyframes fadeUp {
           to { opacity: 1; transform: translateY(0); }
         }
 
-        .stats {
+        /* Search bar */
+        .search-section {
           position: relative;
           z-index: 10;
           padding: 0 56px;
           max-width: 1400px;
-          margin: 0 auto 60px;
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-          gap: 24px;
+          margin: 0 auto 32px;
           opacity: 0;
-          transform: translateY(30px);
-          animation: ${mounted ? 'fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.7s forwards' : 'none'};
+          transform: translateY(20px);
+          animation: ${mounted ? 'fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.4s forwards' : 'none'};
         }
 
-        .stat-card {
-          padding: 28px;
-          background: rgba(255, 255, 255, 0.03);
-          border: 1px solid rgba(255, 255, 255, 0.08);
-          border-radius: 16px;
-          backdrop-filter: blur(20px);
-          transition: all 0.3s ease;
+        .search-wrapper {
+          position: relative;
         }
 
-        .stat-card:hover {
+        .search-input {
+          width: 100%;
+          padding: 18px 24px 18px 56px;
           background: rgba(255, 255, 255, 0.05);
-          border-color: rgba(107, 164, 255, 0.3);
-          transform: translateY(-2px);
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 16px;
+          color: #ffffff;
+          font-size: 16px;
+          font-family: 'Inter', sans-serif;
+          backdrop-filter: blur(20px);
+          transition: all 0.2s ease;
+          outline: none;
         }
 
-        .stat-label {
-          font-size: 11px;
-          letter-spacing: 0.2em;
-          text-transform: uppercase;
-          color: rgba(255, 255, 255, 0.5);
-          margin-bottom: 12px;
+        .search-input:focus {
+          border-color: rgba(107, 164, 255, 0.5);
+          background: rgba(255, 255, 255, 0.08);
+          box-shadow: 0 0 0 4px rgba(107, 164, 255, 0.1);
         }
 
-        .stat-value {
-          font-family: 'Fraunces', serif;
-          font-size: 42px;
-          font-weight: 500;
-          letter-spacing: -0.02em;
+        .search-input::placeholder {
+          color: rgba(255, 255, 255, 0.35);
+        }
+
+        .search-icon {
+          position: absolute;
+          left: 20px;
+          top: 50%;
+          transform: translateY(-50%);
+          color: rgba(255, 255, 255, 0.4);
+          pointer-events: none;
+        }
+
+        .search-clear {
+          position: absolute;
+          right: 16px;
+          top: 50%;
+          transform: translateY(-50%);
+          background: rgba(255, 255, 255, 0.08);
+          border: none;
+          border-radius: 8px;
+          padding: 6px 12px;
+          color: rgba(255, 255, 255, 0.7);
+          font-size: 12px;
+          cursor: pointer;
+          letter-spacing: 0.05em;
+        }
+
+        .search-clear:hover {
+          background: rgba(255, 255, 255, 0.15);
           color: #ffffff;
         }
 
-        .stat-meta {
-          font-size: 13px;
-          color: rgba(255, 255, 255, 0.4);
-          margin-top: 8px;
+        /* Tabs */
+        .tabs-section {
+          position: relative;
+          z-index: 10;
+          padding: 0 56px;
+          max-width: 1400px;
+          margin: 0 auto 32px;
+          opacity: 0;
+          transform: translateY(20px);
+          animation: ${mounted ? 'fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.55s forwards' : 'none'};
         }
 
-        .files-section {
+        .tabs-pill {
+          display: inline-flex;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 999px;
+          padding: 6px;
+          gap: 4px;
+          backdrop-filter: blur(20px);
+        }
+
+        .tab-btn {
+          padding: 10px 24px;
+          background: transparent;
+          border: none;
+          border-radius: 999px;
+          color: rgba(255, 255, 255, 0.6);
+          font-size: 13px;
+          font-weight: 500;
+          letter-spacing: 0.02em;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          font-family: 'Inter', sans-serif;
+        }
+
+        .tab-btn:hover {
+          color: #ffffff;
+        }
+
+        .tab-btn.active {
+          background: linear-gradient(135deg, #4d8eff 0%, #1546c4 100%);
+          color: #ffffff;
+          box-shadow: 0 4px 16px rgba(77, 142, 255, 0.3);
+        }
+
+        /* Content area */
+        .content-section {
           position: relative;
           z-index: 10;
           padding: 0 56px 200px;
           max-width: 1400px;
           margin: 0 auto;
-          opacity: 0;
-          transform: translateY(30px);
-          animation: ${mounted ? 'fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.9s forwards' : 'none'};
         }
 
-        .files-section-header {
+        .coming-soon {
+          padding: 100px 40px;
+          text-align: center;
+          background: rgba(255, 255, 255, 0.02);
+          border: 1px dashed rgba(255, 255, 255, 0.15);
+          border-radius: 16px;
+        }
+
+        .coming-soon h2 {
+          font-family: 'Fraunces', serif;
+          font-size: 36px;
+          font-weight: 500;
+          color: rgba(255, 255, 255, 0.7);
+          margin: 0 0 12px;
+        }
+
+        .coming-soon p {
+          color: rgba(255, 255, 255, 0.4);
+          margin: 0;
+          font-size: 14px;
+          letter-spacing: 0.05em;
+        }
+
+        /* Search results */
+        .search-results-section {
+          margin-bottom: 40px;
+        }
+
+        .search-results-header {
           display: flex;
           justify-content: space-between;
           align-items: baseline;
-          margin-bottom: 32px;
+          margin-bottom: 24px;
         }
 
-        .section-title {
+        .search-results-title {
           font-family: 'Fraunces', serif;
           font-size: 28px;
           font-weight: 500;
@@ -475,6 +605,55 @@ export default function Dashboard() {
           margin: 0;
         }
 
+        .search-results-meta {
+          font-size: 12px;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          color: rgba(107, 164, 255, 0.8);
+        }
+
+        .search-result-card {
+          margin-bottom: 24px;
+          background: rgba(255, 255, 255, 0.02);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 16px;
+          overflow: hidden;
+        }
+
+        .search-result-header {
+          padding: 18px 24px;
+          background: rgba(107, 164, 255, 0.1);
+          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 12px;
+        }
+
+        .search-result-filename {
+          font-family: 'JetBrains Mono', 'Courier New', monospace;
+          font-size: 13px;
+          color: #ffffff;
+          word-break: break-all;
+        }
+
+        .search-result-system {
+          font-family: 'Fraunces', serif;
+          font-size: 16px;
+          color: #6ba4ff;
+          margin-right: 12px;
+        }
+
+        .search-result-count {
+          font-size: 11px;
+          letter-spacing: 0.15em;
+          text-transform: uppercase;
+          color: rgba(107, 164, 255, 0.9);
+          white-space: nowrap;
+        }
+
+        /* Month/system view */
         .month-block {
           margin-bottom: 56px;
         }
@@ -531,7 +710,6 @@ export default function Dashboard() {
           font-weight: 500;
           color: #ffffff;
           margin: 0;
-          letter-spacing: -0.01em;
         }
 
         .system-count {
@@ -588,7 +766,6 @@ export default function Dashboard() {
         .file-item-meta {
           font-size: 12px;
           color: rgba(255, 255, 255, 0.4);
-          letter-spacing: 0.05em;
           white-space: nowrap;
         }
 
@@ -602,31 +779,23 @@ export default function Dashboard() {
 
         .error-state { color: #ff8888; }
 
+        /* Content viewer */
         .content-viewer {
           margin: 8px 28px 16px;
           background: rgba(10, 30, 70, 0.6);
           border: 1px solid rgba(107, 164, 255, 0.25);
           border-radius: 12px;
           overflow: hidden;
-          backdrop-filter: blur(20px);
           animation: slideOpen 0.3s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
         @keyframes slideOpen {
-          from {
-            opacity: 0;
-            transform: translateY(-8px);
-            max-height: 0;
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-            max-height: 800px;
-          }
+          from { opacity: 0; transform: translateY(-8px); max-height: 0; }
+          to { opacity: 1; transform: translateY(0); max-height: 800px; }
         }
 
         .content-header {
-          padding: 24px 28px;
+          padding: 20px 24px;
           background: rgba(107, 164, 255, 0.1);
           border-bottom: 1px solid rgba(255, 255, 255, 0.08);
           display: flex;
@@ -638,7 +807,7 @@ export default function Dashboard() {
 
         .content-header-info h4 {
           font-family: 'Fraunces', serif;
-          font-size: 20px;
+          font-size: 18px;
           font-weight: 500;
           color: #ffffff;
           margin: 0 0 6px;
@@ -647,7 +816,7 @@ export default function Dashboard() {
 
         .content-header-info p {
           margin: 0;
-          font-size: 12px;
+          font-size: 11px;
           letter-spacing: 0.1em;
           text-transform: uppercase;
           color: rgba(255, 255, 255, 0.45);
@@ -732,38 +901,19 @@ export default function Dashboard() {
           z-index: 2;
         }
 
-        .wave {
-          position: absolute;
-          bottom: 0;
-          left: 0;
-          width: 200%;
-          height: 100%;
-        }
-
-        @keyframes waveSlow {
-          from { transform: translateX(0); }
-          to { transform: translateX(-50%); }
-        }
-
-        @keyframes waveMid {
-          from { transform: translateX(-50%); }
-          to { transform: translateX(0); }
-        }
-
-        @keyframes waveFast {
-          from { transform: translateX(0); }
-          to { transform: translateX(-50%); }
-        }
-
+        .wave { position: absolute; bottom: 0; left: 0; width: 200%; height: 100%; }
+        @keyframes waveSlow { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+        @keyframes waveMid { from { transform: translateX(-50%); } to { transform: translateX(0); } }
+        @keyframes waveFast { from { transform: translateX(0); } to { transform: translateX(-50%); } }
         .wave-1 svg { animation: waveSlow 25s linear infinite; }
         .wave-2 svg { animation: waveMid 18s linear infinite; }
         .wave-3 svg { animation: waveFast 12s linear infinite; }
 
         @media (max-width: 768px) {
           .header { padding: 24px; }
-          .hero { padding: 60px 24px 40px; }
-          .stats { padding: 0 24px; margin-bottom: 40px; }
-          .files-section { padding: 0 24px 200px; }
+          .hero { padding: 40px 24px 24px; }
+          .search-section, .tabs-section, .content-section { padding: 0 24px; }
+          .content-section { padding-bottom: 200px; }
           .month-heading { font-size: 26px; }
         }
       `}</style>
@@ -784,155 +934,260 @@ export default function Dashboard() {
       <section className="hero">
         <div className="eyebrow">Internal Operations</div>
         <h1 className="title">
-          Gig Insurance<br />
-          <span className="title-accent">Internal Dashboard</span>
+          Gig Insurance <span className="title-accent">Internal Dashboard</span>
         </h1>
-        <p className="subtitle">
-          Centralized view of remittance files arriving through the secure file transfer system. Files are organized by month, then by enrollment system. Click any file to preview its contents.
-        </p>
       </section>
 
-      <section className="stats">
-        <div className="stat-card">
-          <div className="stat-label">Enrollment Systems</div>
-          <div className="stat-value">8</div>
-          <div className="stat-meta">All active</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">Total Files</div>
-          <div className="stat-value">{loading ? '—' : totalFiles}</div>
-          <div className="stat-meta">{loading ? 'Loading…' : 'Across all systems'}</div>
+      {/* Search bar */}
+      <section className="search-section">
+        <div className="search-wrapper">
+          <svg className="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            className="search-input"
+            type="text"
+            placeholder="Search member by name (first, last, or full name)..."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+          />
+          {searchInput && (
+            <button className="search-clear" onClick={() => setSearchInput('')}>Clear</button>
+          )}
         </div>
       </section>
 
-      <section className="files-section">
-        <div className="files-section-header">
-          <h2 className="section-title">Uploaded Files</h2>
+      {/* Tabs */}
+      <section className="tabs-section">
+        <div className="tabs-pill">
+          <button
+            className={`tab-btn ${activeTab === 'master' ? 'active' : ''}`}
+            onClick={() => setActiveTab('master')}
+          >
+            Master Dashboard
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'all-info' ? 'active' : ''}`}
+            onClick={() => setActiveTab('all-info')}
+          >
+            All Info
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'consultant' ? 'active' : ''}`}
+            onClick={() => setActiveTab('consultant')}
+          >
+            Consultant Report
+          </button>
         </div>
+      </section>
 
-        {loading && (
-          <div className="system-group">
-            <div className="loading-state">Loading files...</div>
-          </div>
-        )}
-
-        {error && (
-          <div className="system-group">
-            <div className="error-state">Error: {error}</div>
-          </div>
-        )}
-
-        {!loading && !error && sortedMonthKeys.length === 0 && (
-          <div className="system-group">
-            <div className="empty-state">No files uploaded yet.</div>
-          </div>
-        )}
-
-        {!loading && !error && sortedMonthKeys.map((mKey) => {
-          const monthBlock = grouped[mKey];
-          const fileCount = Object.values(monthBlock.systems).reduce((sum, files) => sum + files.length, 0);
-          return (
-            <div key={mKey} className="month-block">
-              <h2 className="month-heading">
-                {monthBlock.label}
-                <span className="month-count">{fileCount} file{fileCount !== 1 ? 's' : ''}</span>
+      <section className="content-section">
+        {/* SEARCH RESULTS (shown regardless of tab when query is active) */}
+        {searchQuery && (
+          <div className="search-results-section">
+            <div className="search-results-header">
+              <h2 className="search-results-title">
+                Search results for &ldquo;{searchQuery}&rdquo;
               </h2>
+              {searchResults && (
+                <span className="search-results-meta">
+                  {searchResults.totalMatches} match{searchResults.totalMatches !== 1 ? 'es' : ''} in {searchResults.filesWithMatches} of {searchResults.filesScanned} files
+                </span>
+              )}
+            </div>
 
-              {Object.keys(monthBlock.systems).sort().map((system) => (
-                <div key={system} className="system-group">
-                  <div className="system-name">
-                    <h3>{prettifySystemName(system)}</h3>
-                    <span className="system-count">{monthBlock.systems[system].length} file{monthBlock.systems[system].length !== 1 ? 's' : ''}</span>
+            {searching && (
+              <div className="search-result-card">
+                <div className="loading-state">Searching all files...</div>
+              </div>
+            )}
+
+            {searchError && (
+              <div className="search-result-card">
+                <div className="error-state">Error: {searchError}</div>
+              </div>
+            )}
+
+            {!searching && !searchError && searchResults && searchResults.results.length === 0 && (
+              <div className="search-result-card">
+                <div className="empty-state">No matches found.</div>
+              </div>
+            )}
+
+            {!searching && !searchError && searchResults && searchResults.results.map((result) => (
+              <div key={result.fileKey} className="search-result-card">
+                <div className="search-result-header">
+                  <div>
+                    <span className="search-result-system">{prettifySystemName(result.system)}</span>
+                    <span className="search-result-filename">{result.filename}</span>
                   </div>
-                  <ul className="file-list">
-                    {monthBlock.systems[system].map((file) => (
-                      <li key={file.key} className="file-item-wrapper">
-                        <div
-                          className={`file-item ${selectedFile?.key === file.key ? 'selected' : ''}`}
-                          onClick={() => {
-                            if (selectedFile?.key === file.key) {
-                              setSelectedFile(null);
-                              setFileContent(null);
-                            } else {
-                              loadFileContent(file);
-                            }
-                          }}
-                        >
-                          <span className="file-item-name">{file.filename}</span>
-                          <span className="file-item-meta">
-                            {formatBytes(file.size)} · {formatDate(file.lastModified)}
-                          </span>
-                        </div>
+                  <span className="search-result-count">
+                    {result.rows.length} match{result.rows.length !== 1 ? 'es' : ''}
+                  </span>
+                </div>
+                <div className="table-scroll">
+                  <table className="content-table">
+                    <thead>
+                      <tr>
+                        {result.headers.map((h, i) => (
+                          <th key={i}>{h || `Column ${i + 1}`}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.rows.map((row, i) => (
+                        <tr key={i}>
+                          {result.headers.map((_, j) => (
+                            <td key={j}>{highlight(row[j] || '', searchQuery)}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
-                        {selectedFile?.key === file.key && (
-                          <div className="content-viewer">
-                            <div className="content-header">
-                              <div className="content-header-info">
-                                <h4>{file.filename}</h4>
-                                <p>
-                                  {fileContent?.sheetName ? `Sheet: ${fileContent.sheetName} · ` : ''}
-                                  {fileContent ? `${fileContent.totalRows.toLocaleString()} rows · ${fileContent.headers.length} columns` : ''}
-                                </p>
-                              </div>
-                              <button
-                                className="close-btn"
-                                onClick={(e) => {
-                                  e.stopPropagation();
+        {/* TAB CONTENT (hidden during active search) */}
+        {!searchQuery && activeTab === 'master' && (
+          <div className="coming-soon">
+            <h2>Master Dashboard</h2>
+            <p>Coming soon</p>
+          </div>
+        )}
+
+        {!searchQuery && activeTab === 'consultant' && (
+          <div className="coming-soon">
+            <h2>Consultant Report</h2>
+            <p>Coming soon</p>
+          </div>
+        )}
+
+        {!searchQuery && activeTab === 'all-info' && (
+          <>
+            {loading && (
+              <div className="system-group">
+                <div className="loading-state">Loading files...</div>
+              </div>
+            )}
+
+            {error && (
+              <div className="system-group">
+                <div className="error-state">Error: {error}</div>
+              </div>
+            )}
+
+            {!loading && !error && sortedMonthKeys.length === 0 && (
+              <div className="system-group">
+                <div className="empty-state">No files uploaded yet.</div>
+              </div>
+            )}
+
+            {!loading && !error && sortedMonthKeys.map((mKey) => {
+              const monthBlock = grouped[mKey];
+              const fileCount = Object.values(monthBlock.systems).reduce((sum, files) => sum + files.length, 0);
+              return (
+                <div key={mKey} className="month-block">
+                  <h2 className="month-heading">
+                    {monthBlock.label}
+                    <span className="month-count">{fileCount} file{fileCount !== 1 ? 's' : ''}</span>
+                  </h2>
+
+                  {Object.keys(monthBlock.systems).sort().map((system) => (
+                    <div key={system} className="system-group">
+                      <div className="system-name">
+                        <h3>{prettifySystemName(system)}</h3>
+                        <span className="system-count">{monthBlock.systems[system].length} file{monthBlock.systems[system].length !== 1 ? 's' : ''}</span>
+                      </div>
+                      <ul className="file-list">
+                        {monthBlock.systems[system].map((file) => (
+                          <li key={file.key} className="file-item-wrapper">
+                            <div
+                              className={`file-item ${selectedFile?.key === file.key ? 'selected' : ''}`}
+                              onClick={() => {
+                                if (selectedFile?.key === file.key) {
                                   setSelectedFile(null);
                                   setFileContent(null);
-                                }}
-                              >
-                                Close
-                              </button>
+                                } else {
+                                  loadFileContent(file);
+                                }
+                              }}
+                            >
+                              <span className="file-item-name">{file.filename}</span>
+                              <span className="file-item-meta">
+                                {formatBytes(file.size)} · {formatDate(file.lastModified)}
+                              </span>
                             </div>
 
-                            {contentLoading && (
-                              <div className="loading-state">Loading file contents...</div>
-                            )}
-
-                            {contentError && (
-                              <div className="error-state">Error: {contentError}</div>
-                            )}
-
-                            {fileContent && (
-                              <>
-                                <div className="table-scroll">
-                                  <table className="content-table">
-                                    <thead>
-                                      <tr>
-                                        {fileContent.headers.map((h, i) => (
-                                          <th key={i}>{h || `Column ${i + 1}`}</th>
-                                        ))}
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {fileContent.rows.map((row, i) => (
-                                        <tr key={i}>
-                                          {fileContent.headers.map((_, j) => (
-                                            <td key={j}>{row[j] ?? ''}</td>
-                                          ))}
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                                {fileContent.rows.length < fileContent.totalRows && (
-                                  <div className="content-footer">
-                                    Showing first {fileContent.rows.length.toLocaleString()} of {fileContent.totalRows.toLocaleString()} rows
+                            {selectedFile?.key === file.key && (
+                              <div className="content-viewer">
+                                <div className="content-header">
+                                  <div className="content-header-info">
+                                    <h4>{file.filename}</h4>
+                                    <p>
+                                      {fileContent?.sheetName ? `Sheet: ${fileContent.sheetName} · ` : ''}
+                                      {fileContent ? `${fileContent.totalRows.toLocaleString()} rows · ${fileContent.headers.length} columns` : ''}
+                                    </p>
                                   </div>
+                                  <button
+                                    className="close-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSelectedFile(null);
+                                      setFileContent(null);
+                                    }}
+                                  >
+                                    Close
+                                  </button>
+                                </div>
+
+                                {contentLoading && <div className="loading-state">Loading file contents...</div>}
+                                {contentError && <div className="error-state">Error: {contentError}</div>}
+
+                                {fileContent && (
+                                  <>
+                                    <div className="table-scroll">
+                                      <table className="content-table">
+                                        <thead>
+                                          <tr>
+                                            {fileContent.headers.map((h, i) => (
+                                              <th key={i}>{h || `Column ${i + 1}`}</th>
+                                            ))}
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {fileContent.rows.map((row, i) => (
+                                            <tr key={i}>
+                                              {fileContent.headers.map((_, j) => (
+                                                <td key={j}>{row[j] ?? ''}</td>
+                                              ))}
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                    {fileContent.rows.length < fileContent.totalRows && (
+                                      <div className="content-footer">
+                                        Showing first {fileContent.rows.length.toLocaleString()} of {fileContent.totalRows.toLocaleString()} rows
+                                      </div>
+                                    )}
+                                  </>
                                 )}
-                              </>
+                              </div>
                             )}
-                          </div>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          );
-        })}
+              );
+            })}
+          </>
+        )}
       </section>
 
       <div className="wave-container">
