@@ -24,6 +24,7 @@ type SearchMatch = {
   rows: string[][];
   matchedTermsPerRow: string[][];
   matchedColumns: string[];
+  matchedColumnIndices: number[];
 };
 
 type SearchResponse = {
@@ -315,7 +316,7 @@ export default function Dashboard() {
   }, [searchQuery]);
 
   const sortedMonthKeys = Object.keys(grouped)
-    .filter((k) => k === '2026-04') // Hardcoded: only May 2026 (month is 0-indexed, so May=04)
+    .filter((k) => k === '2026-02') // Hardcoded: only March 2026 (month is 0-indexed, so February=01, March=02)
     .sort((a, b) => {
       const aUnknown = a.startsWith('unknown-');
       const bUnknown = b.startsWith('unknown-');
@@ -1159,9 +1160,17 @@ export default function Dashboard() {
                                   <tbody>
                                     {result.rows.map((row, i) => (
                                       <tr key={i}>
-                                        {result.headers.map((_, j) => (
-                                          <td key={j}>{highlight(row[j] || '', highlightTerms)}</td>
-                                        ))}
+                                        {result.headers.map((_, j) => {
+                                          const cellValue = row[j] || '';
+                                          const isNameColumn = result.matchedColumnIndices.includes(j);
+                                          return (
+                                            <td key={j}>
+                                              {isNameColumn
+                                                ? highlight(cellValue, highlightTerms)
+                                                : cellValue}
+                                            </td>
+                                          );
+                                        })}
                                       </tr>
                                     ))}
                                   </tbody>

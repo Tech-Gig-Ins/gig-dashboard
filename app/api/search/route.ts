@@ -98,6 +98,7 @@ type MatchResult = {
   rows: string[][]; // matching rows only
   matchedTermsPerRow: string[][]; // for each row, which terms matched (e.g., ["Alice"], ["Alice", "Beene"])
   matchedColumns: string[]; // which name columns this file has
+  matchedColumnIndices: number[]; // indices of name columns (for highlighting on frontend)
 };
 
 async function searchFile(key: string, query: string): Promise<MatchResult | null> {
@@ -156,18 +157,35 @@ async function searchFile(key: string, query: string): Promise<MatchResult | nul
       return null; // unsupported file type
     }
 
-    // Find which columns in this file are name-related
-    const matchedColumnIndices: number[] = [];
-    const matchedColumnNames: string[] = [];
+    // Classify each name column by its semantic role
+    type ColRole = 'first' | 'last' | 'subscriber' | 'generic';
+    type ClassifiedCol = { index: number; name: string; role: ColRole };
+
+    const classifyColumn = (header: string): ColRole | null => {
+      const norm = normalizeHeader(header);
+      // Check most specific patterns first
+      if (norm.includes('subscriber name') || norm === 'subscriber') return 'subscriber';
+      if (norm.includes('member name')) return 'subscriber';
+      if (norm.includes('first name') || norm.includes('member first')) return 'first';
+      if (norm.includes('last name') || norm.includes('member last')) return 'last';
+      return null;
+    };
+
+    const classifiedCols: ClassifiedCol[] = [];
     headers.forEach((h, i) => {
-      const norm = normalizeHeader(h);
-      if (NAME_COLUMNS.some(nc => norm.includes(nc))) {
-        matchedColumnIndices.push(i);
-        matchedColumnNames.push(h);
+      const role = classifyColumn(h);
+      if (role) {
+        classifiedCols.push({ index: i, name: h, role });
       }
     });
 
-    if (matchedColumnIndices.length === 0) return null;
+    if (classifiedCols.length === 0) return null;
+
+    const matchedColumnIndices = classifiedCols.map(c => c.index);
+    const matchedColumnNames = classifiedCols.map(c => c.name);
+    const firstCols = classifiedCols.filter(c => c.role === 'first');
+    const lastCols = classifiedCols.filter(c => c.role === 'last');
+    const subscriberCols = classifiedCols.filter(c => c.role === 'subscriber');
 
     // Normalize: lowercase and strip non-alphabetic characters
     // So "BEENE, ALICE" → "beenealice", "Alice Beene" → "alicebeene"
@@ -177,62 +195,63 @@ async function searchFile(key: string, query: string): Promise<MatchResult | nul
     const rawQuery = query.trim();
     if (rawQuery.length === 0) return null;
 
-    // Build search terms from the query
-    // If multi-word, search each word separately + both as combined (in both orders)
     const words = rawQuery.split(/\s+/).filter(w => w.length > 0);
-    const searchTerms: { label: string; normalized: string }[] = [];
 
-    if (words.length === 1) {
-      searchTerms.push({ label: words[0], normalized: normalize(words[0]) });
-    } else {
-      // Each individual word
-      for (const w of words) {
-        searchTerms.push({ label: w, normalized: normalize(w) });
-      }
-      // Combined: "Alice Beene" and reverse "Beene Alice"
-      const combinedForward = normalize(words.join(''));
-      const combinedReverse = normalize([...words].reverse().join(''));
-      searchTerms.push({ label: words.join(' '), normalized: combinedForward });
-      if (combinedReverse !== combinedForward) {
-        // Also try the reverse so "Alice Beene" matches "BEENE, ALICE"
-        // We track this under the same combined label so dedup works naturally
-      }
-      // We will check BOTH directions in matching logic below; the label stays "Alice Beene"
-    }
-
-    // For each row, determine which terms it matched (one or more)
-    // Dedup by row index automatically (we iterate once per row)
+    // For each row, determine which terms matched
     type MatchedRow = { row: string[]; matchedTerms: string[] };
     const matchedRows: MatchedRow[] = [];
 
-    allRows.forEach((row) => {
-      // Build a single normalized blob of all name-column cells for this row
-      const cellBlobs = matchedColumnIndices.map((idx) => normalize(String(row[idx] || '')));
+    if (words.length === 2) {
+      // AND logic: both words must appear together in a name pattern
+      const w1 = normalize(words[0]);
+      const w2 = normalize(words[1]);
+      const combinedLabel = words.join(' ');
+      if (w1.length === 0 || w2.length === 0) return null;
 
-      const termsHit: string[] = [];
-      for (const term of searchTerms) {
-        if (term.normalized.length === 0) continue;
-        const hits = cellBlobs.some((blob) => blob.includes(term.normalized));
-        if (hits) {
-          termsHit.push(term.label);
+      allRows.forEach((row) => {
+        // Get normalized values for each role
+        const firstVals = firstCols.map(c => normalize(String(row[c.index] || '')));
+        const lastVals = lastCols.map(c => normalize(String(row[c.index] || '')));
+        const subscriberVals = subscriberCols.map(c => normalize(String(row[c.index] || '')));
+
+        // Condition 1: w1 in first AND w2 in last
+        const cond1 =
+          firstVals.some(v => v.includes(w1)) &&
+          lastVals.some(v => v.includes(w2));
+
+        // Condition 2 (reverse): w2 in first AND w1 in last
+        const cond2 =
+          firstVals.some(v => v.includes(w2)) &&
+          lastVals.some(v => v.includes(w1));
+
+        // Condition 3: both words in subscriber name (any order)
+        const cond3 = subscriberVals.some(v => v.includes(w1) && v.includes(w2));
+
+        if (cond1 || cond2 || cond3) {
+          matchedRows.push({ row, matchedTerms: [words[0], words[1], combinedLabel] });
         }
-      }
+      });
+    } else {
+      // Single word OR 3+ words: OR logic across all name columns (treat each word separately)
+      const wordNormals = words.map(w => ({ label: w, normalized: normalize(w) }))
+        .filter(w => w.normalized.length > 0);
+      if (wordNormals.length === 0) return null;
 
-      // For multi-word queries, also check the reverse-combined form
-      if (words.length > 1) {
-        const reverseCombined = normalize([...words].reverse().join(''));
-        const combinedLabel = words.join(' ');
-        const alreadyHasCombined = termsHit.includes(combinedLabel);
-        if (!alreadyHasCombined) {
-          const hits = cellBlobs.some((blob) => blob.includes(reverseCombined));
-          if (hits) termsHit.push(combinedLabel);
+      allRows.forEach((row) => {
+        const cellBlobs = matchedColumnIndices.map((idx) => normalize(String(row[idx] || '')));
+        const termsHit: string[] = [];
+
+        for (const w of wordNormals) {
+          if (cellBlobs.some(blob => blob.includes(w.normalized))) {
+            termsHit.push(w.label);
+          }
         }
-      }
 
-      if (termsHit.length > 0) {
-        matchedRows.push({ row, matchedTerms: termsHit });
-      }
-    });
+        if (termsHit.length > 0) {
+          matchedRows.push({ row, matchedTerms: termsHit });
+        }
+      });
+    }
 
     if (matchedRows.length === 0) return null;
 
@@ -244,6 +263,7 @@ async function searchFile(key: string, query: string): Promise<MatchResult | nul
       rows: matchedRows.slice(0, 50).map(m => m.row),
       matchedTermsPerRow: matchedRows.slice(0, 50).map(m => m.matchedTerms),
       matchedColumns: matchedColumnNames,
+      matchedColumnIndices, // NEW: indices of name columns in this file (for highlighting)
     };
   } catch (err) {
     console.error(`Error searching file ${key}:`, err);
