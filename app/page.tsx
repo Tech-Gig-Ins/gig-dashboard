@@ -315,7 +315,7 @@ export default function Dashboard() {
   }, [searchQuery]);
 
   const sortedMonthKeys = Object.keys(grouped)
-    .filter((k) => k === '2026-02') // Hardcoded: only March 2026 (month is 0-indexed, so February=01, March=02)
+    .filter((k) => k === '2026-04') // Hardcoded: only May 2026 (month is 0-indexed, so May=04)
     .sort((a, b) => {
       const aUnknown = a.startsWith('unknown-');
       const bUnknown = b.startsWith('unknown-');
