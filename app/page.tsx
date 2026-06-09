@@ -22,6 +22,7 @@ type SearchMatch = {
   system: string;
   headers: string[];
   rows: string[][];
+  matchedTermsPerRow: string[][];
   matchedColumns: string[];
 };
 
@@ -178,18 +179,41 @@ function groupFiles(files: FileRow[]): DoubleGrouped {
   return result;
 }
 
-// Highlight matched portion of text in a cell
-function highlight(text: string, query: string): React.ReactNode {
-  if (!query) return text;
-  const idx = text.toLowerCase().indexOf(query.toLowerCase());
-  if (idx === -1) return text;
+// Highlight matched portions of text. Supports multiple terms.
+function highlight(text: string, terms: string[]): React.ReactNode {
+  if (!terms || terms.length === 0 || !text) return text;
+
+  // Build a regex that matches any of the terms (case-insensitive)
+  // Escape regex special characters in terms
+  const escaped = terms
+    .filter(t => t && t.length > 0)
+    .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (escaped.length === 0) return text;
+
+  const re = new RegExp(`(${escaped.join('|')})`, 'gi');
+  const parts = text.split(re);
+
   return (
     <>
-      {text.slice(0, idx)}
-      <mark style={{ background: 'rgba(255, 220, 100, 0.4)', color: '#fff', padding: '0 2px', borderRadius: '3px' }}>
-        {text.slice(idx, idx + query.length)}
-      </mark>
-      {text.slice(idx + query.length)}
+      {parts.map((part, i) => {
+        const isMatch = escaped.some(t => part.toLowerCase() === t.toLowerCase());
+        if (isMatch) {
+          return (
+            <mark
+              key={i}
+              style={{
+                background: 'rgba(255, 220, 100, 0.4)',
+                color: '#fff',
+                padding: '0 2px',
+                borderRadius: '3px',
+              }}
+            >
+              {part}
+            </mark>
+          );
+        }
+        return <span key={i}>{part}</span>;
+      })}
     </>
   );
 }
@@ -290,13 +314,15 @@ export default function Dashboard() {
       });
   }, [searchQuery]);
 
-  const sortedMonthKeys = Object.keys(grouped).sort((a, b) => {
-    const aUnknown = a.startsWith('unknown-');
-    const bUnknown = b.startsWith('unknown-');
-    if (aUnknown && !bUnknown) return 1;
-    if (!aUnknown && bUnknown) return -1;
-    return b.localeCompare(a);
-  });
+  const sortedMonthKeys = Object.keys(grouped)
+    .filter((k) => k === '2026-02') // Hardcoded: only March 2026 (month is 0-indexed, so February=01, March=02)
+    .sort((a, b) => {
+      const aUnknown = a.startsWith('unknown-');
+      const bUnknown = b.startsWith('unknown-');
+      if (aUnknown && !bUnknown) return 1;
+      if (!aUnknown && bUnknown) return -1;
+      return b.localeCompare(a);
+    });
 
   return (
     <main className="dashboard-root">
@@ -618,6 +644,41 @@ export default function Dashboard() {
           border: 1px solid rgba(255, 255, 255, 0.08);
           border-radius: 16px;
           overflow: hidden;
+        }
+
+        .search-file-block {
+          border-top: 1px solid rgba(255, 255, 255, 0.04);
+        }
+
+        .search-file-block:first-of-type {
+          border-top: none;
+        }
+
+        .search-file-header {
+          padding: 12px 28px;
+          background: rgba(0, 0, 0, 0.15);
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+          flex-wrap: wrap;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        }
+
+        .search-file-name {
+          font-family: 'JetBrains Mono', 'Courier New', monospace;
+          font-size: 12px;
+          color: rgba(255, 255, 255, 0.85);
+          word-break: break-all;
+        }
+
+        .search-file-count {
+          font-size: 10px;
+          letter-spacing: 0.15em;
+          text-transform: uppercase;
+          color: rgba(107, 164, 255, 0.9);
+          white-space: nowrap;
+          font-weight: 500;
         }
 
         .search-result-header {
@@ -1015,39 +1076,106 @@ export default function Dashboard() {
               </div>
             )}
 
-            {!searching && !searchError && searchResults && searchResults.results.map((result) => (
-              <div key={result.fileKey} className="search-result-card">
-                <div className="search-result-header">
-                  <div>
-                    <span className="search-result-system">{prettifySystemName(result.system)}</span>
-                    <span className="search-result-filename">{result.filename}</span>
-                  </div>
-                  <span className="search-result-count">
-                    {result.rows.length} match{result.rows.length !== 1 ? 'es' : ''}
-                  </span>
-                </div>
-                <div className="table-scroll">
-                  <table className="content-table">
-                    <thead>
-                      <tr>
-                        {result.headers.map((h, i) => (
-                          <th key={i}>{h || `Column ${i + 1}`}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.rows.map((row, i) => (
-                        <tr key={i}>
-                          {result.headers.map((_, j) => (
-                            <td key={j}>{highlight(row[j] || '', searchQuery)}</td>
+            {!searching && !searchError && searchResults && searchResults.results.length > 0 && (() => {
+              // Group results by Month → ES → File, mirroring browse hierarchy
+              type GroupedSearch = {
+                [monthKey: string]: {
+                  label: string;
+                  systems: { [system: string]: SearchMatch[] };
+                };
+              };
+              const groupedResults: GroupedSearch = {};
+              for (const r of searchResults.results) {
+                const detected = detectMonthYear(r.filename);
+                let mKey: string, label: string;
+                if (detected) {
+                  mKey = monthKey(detected.year, detected.month);
+                  label = monthLabel(detected.year, detected.month);
+                } else {
+                  mKey = 'unknown';
+                  label = 'Date Unknown';
+                }
+                if (!groupedResults[mKey]) {
+                  groupedResults[mKey] = { label, systems: {} };
+                }
+                if (!groupedResults[mKey].systems[r.system]) {
+                  groupedResults[mKey].systems[r.system] = [];
+                }
+                groupedResults[mKey].systems[r.system].push(r);
+              }
+
+              const monthOrder = Object.keys(groupedResults).sort((a, b) => {
+                if (a === 'unknown') return 1;
+                if (b === 'unknown') return -1;
+                return b.localeCompare(a);
+              });
+
+              const buildSearchTerms = (q: string): string[] => {
+                const words = q.trim().split(/\s+/).filter(w => w.length > 0);
+                if (words.length === 1) return words;
+                return [...words, words.join(' ')];
+              };
+              const highlightTerms = buildSearchTerms(searchQuery);
+
+              return monthOrder.map((mKey) => {
+                const monthBlock = groupedResults[mKey];
+                const totalInMonth = Object.values(monthBlock.systems).reduce((sum, arr) =>
+                  sum + arr.reduce((s, r) => s + r.rows.length, 0), 0);
+
+                return (
+                  <div key={mKey} className="month-block">
+                    <h2 className="month-heading">
+                      {monthBlock.label}
+                      <span className="month-count">{totalInMonth} match{totalInMonth !== 1 ? 'es' : ''}</span>
+                    </h2>
+
+                    {Object.keys(monthBlock.systems).sort().map((system) => {
+                      const filesForSystem = monthBlock.systems[system];
+                      const totalInSystem = filesForSystem.reduce((s, r) => s + r.rows.length, 0);
+                      return (
+                        <div key={system} className="system-group">
+                          <div className="system-name">
+                            <h3>{prettifySystemName(system)}</h3>
+                            <span className="system-count">{totalInSystem} match{totalInSystem !== 1 ? 'es' : ''} across {filesForSystem.length} file{filesForSystem.length !== 1 ? 's' : ''}</span>
+                          </div>
+
+                          {filesForSystem.map((result) => (
+                            <div key={result.fileKey} className="search-file-block">
+                              <div className="search-file-header">
+                                <span className="search-file-name">{result.filename}</span>
+                                <span className="search-file-count">
+                                  {result.rows.length} match{result.rows.length !== 1 ? 'es' : ''}
+                                </span>
+                              </div>
+                              <div className="table-scroll">
+                                <table className="content-table">
+                                  <thead>
+                                    <tr>
+                                      {result.headers.map((h, i) => (
+                                        <th key={i}>{h || `Column ${i + 1}`}</th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {result.rows.map((row, i) => (
+                                      <tr key={i}>
+                                        {result.headers.map((_, j) => (
+                                          <td key={j}>{highlight(row[j] || '', highlightTerms)}</td>
+                                        ))}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
                           ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              });
+            })()}
           </div>
         )}
 

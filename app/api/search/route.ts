@@ -96,6 +96,7 @@ type MatchResult = {
   system: string;
   headers: string[];
   rows: string[][]; // matching rows only
+  matchedTermsPerRow: string[][]; // for each row, which terms matched (e.g., ["Alice"], ["Alice", "Beene"])
   matchedColumns: string[]; // which name columns this file has
 };
 
@@ -168,25 +169,80 @@ async function searchFile(key: string, query: string): Promise<MatchResult | nul
 
     if (matchedColumnIndices.length === 0) return null;
 
-    // Search rows: case-insensitive substring match against any of the name columns
-    const qLower = query.toLowerCase().trim();
-    if (qLower.length === 0) return null;
+    // Normalize: lowercase and strip non-alphabetic characters
+    // So "BEENE, ALICE" → "beenealice", "Alice Beene" → "alicebeene"
+    const normalize = (s: string): string =>
+      String(s || '').toLowerCase().replace(/[^a-z]/g, '');
 
-    const matchingRows = allRows.filter((row) =>
-      matchedColumnIndices.some((idx) => {
-        const cell = String(row[idx] || '').toLowerCase();
-        return cell.includes(qLower);
-      })
-    );
+    const rawQuery = query.trim();
+    if (rawQuery.length === 0) return null;
 
-    if (matchingRows.length === 0) return null;
+    // Build search terms from the query
+    // If multi-word, search each word separately + both as combined (in both orders)
+    const words = rawQuery.split(/\s+/).filter(w => w.length > 0);
+    const searchTerms: { label: string; normalized: string }[] = [];
+
+    if (words.length === 1) {
+      searchTerms.push({ label: words[0], normalized: normalize(words[0]) });
+    } else {
+      // Each individual word
+      for (const w of words) {
+        searchTerms.push({ label: w, normalized: normalize(w) });
+      }
+      // Combined: "Alice Beene" and reverse "Beene Alice"
+      const combinedForward = normalize(words.join(''));
+      const combinedReverse = normalize([...words].reverse().join(''));
+      searchTerms.push({ label: words.join(' '), normalized: combinedForward });
+      if (combinedReverse !== combinedForward) {
+        // Also try the reverse so "Alice Beene" matches "BEENE, ALICE"
+        // We track this under the same combined label so dedup works naturally
+      }
+      // We will check BOTH directions in matching logic below; the label stays "Alice Beene"
+    }
+
+    // For each row, determine which terms it matched (one or more)
+    // Dedup by row index automatically (we iterate once per row)
+    type MatchedRow = { row: string[]; matchedTerms: string[] };
+    const matchedRows: MatchedRow[] = [];
+
+    allRows.forEach((row) => {
+      // Build a single normalized blob of all name-column cells for this row
+      const cellBlobs = matchedColumnIndices.map((idx) => normalize(String(row[idx] || '')));
+
+      const termsHit: string[] = [];
+      for (const term of searchTerms) {
+        if (term.normalized.length === 0) continue;
+        const hits = cellBlobs.some((blob) => blob.includes(term.normalized));
+        if (hits) {
+          termsHit.push(term.label);
+        }
+      }
+
+      // For multi-word queries, also check the reverse-combined form
+      if (words.length > 1) {
+        const reverseCombined = normalize([...words].reverse().join(''));
+        const combinedLabel = words.join(' ');
+        const alreadyHasCombined = termsHit.includes(combinedLabel);
+        if (!alreadyHasCombined) {
+          const hits = cellBlobs.some((blob) => blob.includes(reverseCombined));
+          if (hits) termsHit.push(combinedLabel);
+        }
+      }
+
+      if (termsHit.length > 0) {
+        matchedRows.push({ row, matchedTerms: termsHit });
+      }
+    });
+
+    if (matchedRows.length === 0) return null;
 
     return {
       fileKey: key,
       filename,
       system,
       headers,
-      rows: matchingRows.slice(0, 50), // cap matches per file
+      rows: matchedRows.slice(0, 50).map(m => m.row),
+      matchedTermsPerRow: matchedRows.slice(0, 50).map(m => m.matchedTerms),
       matchedColumns: matchedColumnNames,
     };
   } catch (err) {
