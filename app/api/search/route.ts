@@ -350,9 +350,12 @@ export async function GET(request: Request) {
       if (!lower.endsWith('.csv') && !lower.endsWith('.xlsx') && !lower.endsWith('.xls')) continue;
 
       // Hardcoded: only search May 2026 files (change this when filter changes in page.tsx)
+// Filter: only files from May 2026 onwards
       const filename = obj.Key.split('/').pop() || obj.Key;
       const detected = detectMonthYearForSearch(filename);
-      if (!detected || detected.year !== 2026 || detected.month !== 4) continue;
+      if (!detected) continue;
+      if (detected.year < 2026) continue;
+      if (detected.year === 2026 && detected.month < 4) continue; // 4 = May
       // (month 4 = May, since JS months are 0-indexed: January=0, May=4)
 
       fileKeys.push(obj.Key);

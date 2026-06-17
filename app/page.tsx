@@ -241,6 +241,31 @@ export default function Dashboard() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Master dashboard state
+  type MasterRow = {
+    memberName: string;
+    planName: string;
+    anthemId: string;
+    payment: string;
+    city: string;
+    state: string;
+    address1: string;
+    address2: string;
+    email: string;
+    phone: string;
+    effectiveDate: string;
+    termDate: string;
+    file: string;
+    sourceSystem: string;
+    coverageTier: string;
+  };
+  const [masterRows, setMasterRows] = useState<MasterRow[] | null>(null);
+  const [masterLoading, setMasterLoading] = useState(false);
+  const [masterError, setMasterError] = useState<string | null>(null);
+  const [masterFilesProcessed, setMasterFilesProcessed] = useState(0);
+  const [masterSortKey, setMasterSortKey] = useState<keyof MasterRow | null>(null);
+  const [masterSortDir, setMasterSortDir] = useState<'asc' | 'desc'>('asc');
+
   useEffect(() => {
     setMounted(true);
     fetch('/api/files')
@@ -258,6 +283,28 @@ export default function Dashboard() {
         setLoading(false);
       });
   }, []);
+
+
+  async function handleDownload(fileKey: string, filename: string) {
+  try {
+    const res = await fetch(`/api/download?key=${encodeURIComponent(fileKey)}`);
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `Download failed: ${res.status}`);
+    }
+    const data: { url: string; filename: string } = await res.json();
+
+    // Open a hidden link and click it to start download
+    const a = document.createElement('a');
+    a.href = data.url;
+    a.download = data.filename || filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } catch (e: any) {
+    alert(`Download failed: ${e.message || 'Unknown error'}`);
+  }
+}
 
   async function loadFileContent(file: FileRow) {
     setSelectedFile(file);
@@ -315,8 +362,58 @@ export default function Dashboard() {
       });
   }, [searchQuery]);
 
+  // Fetch master data when Master Dashboard tab becomes active (lazy load)
+  useEffect(() => {
+    if (activeTab !== 'master') return;
+    if (masterRows !== null) return; // already loaded
+    setMasterLoading(true);
+    setMasterError(null);
+    fetch('/api/master')
+      .then((res) => {
+        if (!res.ok) throw new Error(`Master API failed: ${res.status}`);
+        return res.json();
+      })
+      .then((data: { rows: MasterRow[]; filesProcessed: number }) => {
+        setMasterRows(data.rows);
+        setMasterFilesProcessed(data.filesProcessed);
+        setMasterLoading(false);
+      })
+      .catch((e: any) => {
+        setMasterError(e.message || 'Failed to load master data');
+        setMasterLoading(false);
+      });
+  }, [activeTab, masterRows]);
+
+  // Compute sorted master rows
+  const sortedMasterRows = masterRows ? [...masterRows].sort((a, b) => {
+    if (!masterSortKey) return 0;
+    const av = String(a[masterSortKey] || '').toLowerCase();
+    const bv = String(b[masterSortKey] || '').toLowerCase();
+    const cmp = av.localeCompare(bv);
+    return masterSortDir === 'asc' ? cmp : -cmp;
+  }) : null;
+
+  function toggleMasterSort(key: keyof MasterRow) {
+    if (masterSortKey === key) {
+      setMasterSortDir(masterSortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      setMasterSortKey(key);
+      setMasterSortDir('asc');
+    }
+  }
+
   const sortedMonthKeys = Object.keys(grouped)
-    .filter((k) => k === '2026-04') // Hardcoded: only May 2026 (month is 0-indexed, so May=04)
+    .filter((k) => {
+      // Include all months from May 2026 onwards
+      if (k.startsWith('unknown-')) return false;
+      // k looks like "2026-04" (May), "2026-05" (June), etc. Month is 0-indexed.
+      const [yearStr, monthStr] = k.split('-');
+      const year = parseInt(yearStr, 10);
+      const month = parseInt(monthStr, 10);
+      if (year > 2026) return true;
+      if (year === 2026 && month >= 4) return true; // 4 = May
+      return false;
+    })
     .sort((a, b) => {
       const aUnknown = a.startsWith('unknown-');
       const bUnknown = b.startsWith('unknown-');
@@ -612,6 +709,132 @@ export default function Dashboard() {
           letter-spacing: 0.05em;
         }
 
+        /* Master Dashboard */
+        .master-dashboard {
+          opacity: 0;
+          transform: translateY(20px);
+          animation: ${mounted ? 'fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards' : 'none'};
+        }
+
+        .master-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          margin-bottom: 32px;
+          flex-wrap: wrap;
+          gap: 12px;
+        }
+
+        .master-title {
+          font-family: 'Fraunces', serif;
+          font-size: 32px;
+          font-weight: 500;
+          color: #ffffff;
+          margin: 0;
+          letter-spacing: -0.02em;
+        }
+
+        .master-meta {
+          font-size: 12px;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          color: rgba(107, 164, 255, 0.8);
+        }
+
+        .master-table-wrapper {
+          background: rgba(255, 255, 255, 0.02);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 16px;
+          overflow: auto;
+          max-height: 75vh;
+          backdrop-filter: blur(20px);
+        }
+
+        table.master-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 13px;
+        }
+
+        table.master-table th {
+          padding: 14px 18px;
+          text-align: left;
+          font-size: 10px;
+          letter-spacing: 0.15em;
+          text-transform: uppercase;
+          color: rgba(255, 255, 255, 0.7);
+          font-weight: 600;
+          background: rgba(5, 20, 51, 0.95);
+          border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+          position: sticky;
+          top: 0;
+          white-space: nowrap;
+          cursor: pointer;
+          user-select: none;
+          transition: background 0.15s ease;
+          z-index: 2;
+        }
+
+        table.master-table th:hover {
+          background: rgba(15, 40, 90, 0.95);
+          color: #ffffff;
+        }
+
+        table.master-table th.sorted {
+          color: #6ba4ff;
+          background: rgba(15, 40, 90, 0.95);
+        }
+
+        .sort-arrow {
+          margin-left: 4px;
+          color: #6ba4ff;
+        }
+
+        table.master-table td {
+          padding: 12px 18px;
+          color: rgba(255, 255, 255, 0.85);
+          border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+          white-space: nowrap;
+          font-family: 'Inter', sans-serif;
+          font-size: 13px;
+        }
+
+        table.master-table tr:hover td {
+          background: rgba(107, 164, 255, 0.05);
+        }
+
+        table.master-table tr:last-child td {
+          border-bottom: none;
+        }
+
+        .cell-name {
+          font-weight: 500;
+          color: #ffffff;
+        }
+
+        .cell-amount {
+          font-family: 'JetBrains Mono', 'Courier New', monospace;
+          color: #6ba4ff;
+        }
+
+        .cell-pill {
+          display: inline-block;
+          padding: 3px 10px;
+          background: rgba(107, 164, 255, 0.15);
+          border: 1px solid rgba(107, 164, 255, 0.25);
+          border-radius: 999px;
+          font-size: 11px;
+          font-weight: 500;
+          color: #6ba4ff;
+          letter-spacing: 0.02em;
+        }
+
+        .cell-pill-alt {
+          background: rgba(180, 130, 255, 0.12);
+          border-color: rgba(180, 130, 255, 0.25);
+          color: #b482ff;
+        }
+
         /* Search results */
         .search-results-section {
           margin-bottom: 40px;
@@ -829,6 +1052,40 @@ export default function Dashboard() {
           font-size: 12px;
           color: rgba(255, 255, 255, 0.4);
           white-space: nowrap;
+        }
+
+        .file-item-actions {
+          display: flex;
+          align-items: center;
+          gap: 16px;
+          flex-shrink: 0;
+        }
+
+        .download-btn {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 6px 14px;
+          background: rgba(107, 164, 255, 0.12);
+          border: 1px solid rgba(107, 164, 255, 0.25);
+          border-radius: 8px;
+          color: #6ba4ff;
+          font-size: 12px;
+          font-family: 'Inter', sans-serif;
+          font-weight: 500;
+          letter-spacing: 0.02em;
+          cursor: pointer;
+          transition: all 0.15s ease;
+        }
+
+        .download-btn:hover {
+          background: rgba(107, 164, 255, 0.22);
+          border-color: rgba(107, 164, 255, 0.5);
+          color: #ffffff;
+        }
+
+        .download-btn:active {
+          transform: scale(0.96);
         }
 
         .empty-state, .loading-state, .error-state {
@@ -1190,9 +1447,89 @@ export default function Dashboard() {
 
         {/* TAB CONTENT (hidden during active search) */}
         {!searchQuery && activeTab === 'master' && (
-          <div className="coming-soon">
-            <h2>Master Dashboard</h2>
-            <p>Coming soon</p>
+          <div className="master-dashboard">
+            <div className="master-header">
+              <h2 className="master-title">Master Dashboard</h2>
+              <span className="master-meta">
+                {masterLoading
+                  ? 'Building from May 2026 files...'
+                  : masterRows
+                    ? `${masterRows.length.toLocaleString()} members across ${masterFilesProcessed} files`
+                    : ''}
+              </span>
+            </div>
+
+            {masterLoading && (
+              <div className="loading-state">Loading master data, this may take 10-30 seconds...</div>
+            )}
+
+            {masterError && (
+              <div className="error-state">Error: {masterError}</div>
+            )}
+
+            {!masterLoading && !masterError && sortedMasterRows && sortedMasterRows.length === 0 && (
+              <div className="empty-state">No member records found in May 2026 files.</div>
+            )}
+
+            {!masterLoading && !masterError && sortedMasterRows && sortedMasterRows.length > 0 && (
+              <div className="master-table-wrapper">
+                <table className="master-table">
+                  <thead>
+                    <tr>
+                      {([
+                        ['memberName', 'Member Name'],
+                        ['planName', 'Plan Name'],
+                        ['anthemId', 'Anthem ID'],
+                        ['payment', 'Payment'],
+                        ['city', 'City'],
+                        ['state', 'State'],
+                        ['address1', 'Address 1'],
+                        ['address2', 'Address 2'],
+                        ['email', 'Email'],
+                        ['phone', 'Phone'],
+                        ['effectiveDate', 'Effective Date'],
+                        ['termDate', 'Termination Date'],
+                        ['file', 'File'],
+                        ['sourceSystem', 'Source System'],
+                        ['coverageTier', 'Coverage Tier'],
+                      ] as [keyof MasterRow, string][]).map(([key, label]) => (
+                        <th
+                          key={key}
+                          className={masterSortKey === key ? 'sorted' : ''}
+                          onClick={() => toggleMasterSort(key)}
+                        >
+                          {label}
+                          {masterSortKey === key && (
+                            <span className="sort-arrow"> {masterSortDir === 'asc' ? '↑' : '↓'}</span>
+                          )}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedMasterRows.map((row, i) => (
+                      <tr key={i}>
+                        <td className="cell-name">{row.memberName}</td>
+                        <td>{row.planName}</td>
+                        <td>{row.anthemId}</td>
+                        <td className="cell-amount">{row.payment}</td>
+                        <td>{row.city}</td>
+                        <td>{row.state}</td>
+                        <td>{row.address1}</td>
+                        <td>{row.address2}</td>
+                        <td>{row.email}</td>
+                        <td>{row.phone}</td>
+                        <td>{row.effectiveDate}</td>
+                        <td>{row.termDate}</td>
+                        <td><span className="cell-pill">{row.file}</span></td>
+                        <td><span className="cell-pill cell-pill-alt">{row.sourceSystem}</span></td>
+                        <td>{row.coverageTier}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 
@@ -1242,22 +1579,39 @@ export default function Dashboard() {
                       <ul className="file-list">
                         {monthBlock.systems[system].map((file) => (
                           <li key={file.key} className="file-item-wrapper">
-                            <div
-                              className={`file-item ${selectedFile?.key === file.key ? 'selected' : ''}`}
-                              onClick={() => {
-                                if (selectedFile?.key === file.key) {
-                                  setSelectedFile(null);
-                                  setFileContent(null);
-                                } else {
-                                  loadFileContent(file);
-                                }
-                              }}
-                            >
-                              <span className="file-item-name">{file.filename}</span>
-                              <span className="file-item-meta">
-                                {formatBytes(file.size)} · {formatDate(file.lastModified)}
-                              </span>
-                            </div>
+                              <div
+                                className={`file-item ${selectedFile?.key === file.key ? 'selected' : ''}`}
+                                onClick={() => {
+                                  if (selectedFile?.key === file.key) {
+                                    setSelectedFile(null);
+                                    setFileContent(null);
+                                  } else {
+                                    loadFileContent(file);
+                                  }
+                                }}
+                              >
+                                <span className="file-item-name">{file.filename}</span>
+                                <div className="file-item-actions">
+                                  <span className="file-item-meta">
+                                    {formatBytes(file.size)} · {formatDate(file.lastModified)}
+                                  </span>
+                                  <button
+                                    className="download-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDownload(file.key, file.filename);
+                                    }}
+                                    title="Download this file"
+                                  >
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                      <polyline points="7 10 12 15 17 10" />
+                                      <line x1="12" y1="15" x2="12" y2="3" />
+                                    </svg>
+                                    Download
+                                  </button>
+                                </div>
+                              </div>
 
                             {selectedFile?.key === file.key && (
                               <div className="content-viewer">
