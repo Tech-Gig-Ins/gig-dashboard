@@ -241,7 +241,39 @@ export default function Dashboard() {
   const [masterData, setMasterData] = useState<MasterData | null>(null);
   const [masterLoading, setMasterLoading] = useState(false);
   const [masterError, setMasterError] = useState<string | null>(null);
+
+  // Master search uses a "draft" input + a "committed" query (only updates on Search click / Enter)
+  const [masterSearchInput, setMasterSearchInput] = useState('');
   const [masterSearch, setMasterSearch] = useState('');
+
+  // Filter drawer
+  const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
+
+  // Filter draft state (what user is editing in the drawer)
+  type PaymentFilter = { lt: string; gt: string; eq: string };
+  type FilterState = {
+    planName: string;
+    anthemId: string;
+    payment: PaymentFilter;
+    city: string;
+    state: string;
+    address1: string;
+    address2: string;
+    email: string;
+    phone: string;
+    file: string;
+    sourceSystem: string;
+    coverageTier: string;
+    terminationDate: string; // YYYY-MM-DD format
+    effectiveDate: string;
+  };
+  const emptyFilter: FilterState = {
+    planName: '', anthemId: '', payment: { lt: '', gt: '', eq: '' },
+    city: '', state: '', address1: '', address2: '', email: '', phone: '',
+    file: '', sourceSystem: '', coverageTier: '', terminationDate: '', effectiveDate: '',
+  };
+  const [draftFilters, setDraftFilters] = useState<FilterState>(emptyFilter);
+  const [appliedFilters, setAppliedFilters] = useState<FilterState>(emptyFilter);
 
   useEffect(() => {
     setMounted(true);
@@ -301,22 +333,6 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (searchInput.trim().length < 2) {
-      setSearchQuery('');
-      setSearchResults(null);
-      setSearchError(null);
-      return;
-    }
-    debounceRef.current = setTimeout(() => {
-      setSearchQuery(searchInput.trim());
-    }, 500);
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, [searchInput]);
-
-  useEffect(() => {
     if (!searchQuery) return;
     setSearching(true);
     setSearchError(null);
@@ -334,6 +350,18 @@ export default function Dashboard() {
         setSearching(false);
       });
   }, [searchQuery]);
+
+  // Triggered by clicking Search button or pressing Enter in All Info search input
+  function triggerAllInfoSearch() {
+    const q = searchInput.trim();
+    if (q.length < 2) {
+      setSearchQuery('');
+      setSearchResults(null);
+      setSearchError(null);
+      return;
+    }
+    setSearchQuery(q);
+  }
 
   // Master data lazy load when tab becomes active
   useEffect(() => {
@@ -356,7 +384,7 @@ export default function Dashboard() {
       });
   }, [activeTab, masterData]);
 
-  // Filter master rows by name and/or file
+  // Filter master rows by name and/or file (from the SEARCH bar)
   function filterMasterRows<T extends { normalizedName: string; file: string }>(rows: T[]): T[] {
     const q = masterSearch.trim().toLowerCase();
     if (!q) return rows;
@@ -366,6 +394,140 @@ export default function Dashboard() {
       const fileMatches = r.file.toLowerCase().includes(q);
       return nameMatches || fileMatches;
     });
+  }
+
+  // Apply the column filters (from the FILTER panel) to a row
+  function applyColumnFilters<T extends MemberRecord>(row: T, isTerminatedTable: boolean, isNewTable: boolean): boolean {
+    const f = appliedFilters;
+
+    if (f.planName && !row.planName.toLowerCase().includes(f.planName.toLowerCase())) return false;
+    if (f.anthemId && !row.anthemId.toLowerCase().includes(f.anthemId.toLowerCase())) return false;
+
+    // Payment: parse cell value ($1,234.56 → 1234.56)
+    if (f.payment.lt || f.payment.gt || f.payment.eq) {
+      const raw = String(row.payment).replace(/[$,]/g, '');
+      const num = parseFloat(raw);
+      if (isNaN(num)) return false;
+      if (f.payment.eq) {
+        const target = parseFloat(f.payment.eq);
+        if (!isNaN(target) && num !== target) return false;
+      } else {
+        if (f.payment.lt) {
+          const ub = parseFloat(f.payment.lt);
+          if (!isNaN(ub) && num >= ub) return false;
+        }
+        if (f.payment.gt) {
+          const lb = parseFloat(f.payment.gt);
+          if (!isNaN(lb) && num <= lb) return false;
+        }
+      }
+    }
+
+    if (f.city && !row.city.toLowerCase().includes(f.city.toLowerCase())) return false;
+    if (f.state && row.state !== f.state) return false;
+    if (f.address1 && !row.address1.toLowerCase().includes(f.address1.toLowerCase())) return false;
+    if (f.address2 && !row.address2.toLowerCase().includes(f.address2.toLowerCase())) return false;
+    if (f.email && !row.email.toLowerCase().includes(f.email.toLowerCase())) return false;
+    if (f.phone) {
+      // Strip non-digits from both
+      const phoneDigits = String(row.phone).replace(/[^0-9]/g, '');
+      const filterDigits = f.phone.replace(/[^0-9]/g, '');
+      if (filterDigits && !phoneDigits.includes(filterDigits)) return false;
+    }
+    if (f.file && row.file !== f.file) return false;
+    if (f.sourceSystem && row.sourceSystem !== f.sourceSystem) return false;
+    if (f.coverageTier && !row.coverageTier.toLowerCase().includes(f.coverageTier.toLowerCase())) return false;
+
+    // Date filters only apply to relevant tables
+    if (isTerminatedTable && f.terminationDate) {
+      // Row date is MM/DD/YYYY; filter input is YYYY-MM-DD
+      const rowDate = String((row as any).terminationDate || '').trim();
+      const filterDate = ymdToMdy(f.terminationDate);
+      if (rowDate !== filterDate) return false;
+    }
+    if (isNewTable && f.effectiveDate) {
+      const rowDate = String((row as any).effectiveDate || '').trim();
+      const filterDate = ymdToMdy(f.effectiveDate);
+      if (rowDate !== filterDate) return false;
+    }
+
+    return true;
+  }
+
+  // Convert YYYY-MM-DD (date input format) to MM/DD/YYYY (data format)
+  function ymdToMdy(ymd: string): string {
+    if (!ymd) return '';
+    const [y, m, d] = ymd.split('-');
+    if (!y || !m || !d) return ymd;
+    return `${m}/${d}/${y}`;
+  }
+
+  // Apply both search and filters to a row set
+  function fullyFilter<T extends MemberRecord & { normalizedName: string; file: string }>(
+    rows: T[],
+    isTerminatedTable = false,
+    isNewTable = false,
+  ): T[] {
+    const afterSearch = filterMasterRows(rows);
+    return afterSearch.filter(r => applyColumnFilters(r, isTerminatedTable, isNewTable));
+  }
+
+  // Count how many filters are active
+  function countActiveFilters(f: FilterState): number {
+    let count = 0;
+    if (f.planName) count++;
+    if (f.anthemId) count++;
+    if (f.payment.lt || f.payment.gt || f.payment.eq) count++;
+    if (f.city) count++;
+    if (f.state) count++;
+    if (f.address1) count++;
+    if (f.address2) count++;
+    if (f.email) count++;
+    if (f.phone) count++;
+    if (f.file) count++;
+    if (f.sourceSystem) count++;
+    if (f.coverageTier) count++;
+    if (f.terminationDate) count++;
+    if (f.effectiveDate) count++;
+    return count;
+  }
+
+  const activeFilterCount = countActiveFilters(appliedFilters);
+
+  // Extract unique File and Source System values from master data
+  function uniqueValues(data: MasterData | null, key: 'file' | 'sourceSystem'): string[] {
+    if (!data) return [];
+    const set = new Set<string>();
+    for (const r of data.activeMembers) if (r[key]) set.add(r[key]);
+    for (const r of data.terminatedMembers) if (r[key]) set.add(r[key]);
+    for (const r of data.newMembers) if (r[key]) set.add(r[key]);
+    return Array.from(set).sort();
+  }
+  const fileOptions = uniqueValues(masterData, 'file');
+  const sourceSystemOptions = uniqueValues(masterData, 'sourceSystem');
+
+  // US states
+  const US_STATES = ['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY'];
+
+  // Triggered by clicking Master search button or pressing Enter
+  function triggerMasterSearch() {
+    setMasterSearch(masterSearchInput.trim());
+  }
+
+  function applyFilters() {
+    setAppliedFilters(draftFilters);
+    setFilterDrawerOpen(false);
+  }
+
+  function clearAllFilters() {
+    setDraftFilters(emptyFilter);
+    setAppliedFilters(emptyFilter);
+  }
+
+  function openFilterDrawer() {
+    // Initialize draft with currently applied filters when opening
+    setDraftFilters(appliedFilters);
+    setFilterDrawerOpen(true);
   }
 
   const sortedMonthKeys = Object.keys(grouped)
@@ -560,14 +722,50 @@ export default function Dashboard() {
         .tab-btn:hover { color: #ffffff; }
         .tab-btn.active { background: linear-gradient(135deg, #4d8eff 0%, #1546c4 100%); color: #ffffff; box-shadow: 0 4px 16px rgba(77, 142, 255, 0.3); }
 
-        .search-bar { position: relative; max-width: 1400px; margin: 0 auto 32px; padding: 0 56px; }
-        .search-wrapper { position: relative; }
+        .search-bar { position: relative; max-width: 1400px; margin: 0 auto 32px; padding: 0 56px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .search-wrapper { position: relative; flex: 1; min-width: 280px; }
         .search-input { width: 100%; padding: 16px 24px 16px 56px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 16px; color: #ffffff; font-size: 15px; font-family: 'Inter', sans-serif; backdrop-filter: blur(20px); transition: all 0.2s ease; outline: none; }
         .search-input:focus { border-color: rgba(107, 164, 255, 0.5); background: rgba(255, 255, 255, 0.08); box-shadow: 0 0 0 4px rgba(107, 164, 255, 0.1); }
         .search-input::placeholder { color: rgba(255, 255, 255, 0.35); }
-        .search-icon { position: absolute; left: 76px; top: 50%; transform: translateY(-50%); color: rgba(255, 255, 255, 0.4); pointer-events: none; }
-        .search-clear { position: absolute; right: 72px; top: 50%; transform: translateY(-50%); background: rgba(255, 255, 255, 0.08); border: none; border-radius: 8px; padding: 6px 12px; color: rgba(255, 255, 255, 0.7); font-size: 12px; cursor: pointer; }
+        .search-icon { position: absolute; left: 20px; top: 50%; transform: translateY(-50%); color: rgba(255, 255, 255, 0.4); pointer-events: none; }
+        .search-clear { position: absolute; right: 16px; top: 50%; transform: translateY(-50%); background: rgba(255, 255, 255, 0.08); border: none; border-radius: 8px; padding: 6px 12px; color: rgba(255, 255, 255, 0.7); font-size: 12px; cursor: pointer; }
         .search-clear:hover { background: rgba(255, 255, 255, 0.15); color: #ffffff; }
+        .search-btn { padding: 14px 24px; background: linear-gradient(135deg, #4d8eff 0%, #1546c4 100%); border: none; border-radius: 12px; color: #ffffff; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; box-shadow: 0 4px 16px rgba(77, 142, 255, 0.25); white-space: nowrap; }
+        .search-btn:hover { box-shadow: 0 6px 24px rgba(77, 142, 255, 0.45); transform: translateY(-1px); }
+        .search-btn:active { transform: translateY(0); }
+        .filter-btn { display: flex; align-items: center; gap: 8px; padding: 14px 20px; background: rgba(180, 130, 255, 0.12); border: 1px solid rgba(180, 130, 255, 0.3); border-radius: 12px; color: #b482ff; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; white-space: nowrap; }
+        .filter-btn:hover { background: rgba(180, 130, 255, 0.22); border-color: rgba(180, 130, 255, 0.5); color: #ffffff; }
+        .filter-clear { padding: 14px 18px; background: transparent; border: 1px solid rgba(255, 100, 100, 0.3); border-radius: 12px; color: #ff8888; font-size: 13px; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; white-space: nowrap; }
+        .filter-clear:hover { background: rgba(255, 100, 100, 0.1); color: #ffffff; }
+
+        /* Filter drawer */
+        .filter-overlay { position: fixed; inset: 0; background: rgba(5, 20, 51, 0.6); backdrop-filter: blur(4px); z-index: 100; animation: fadeIn 0.2s ease; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .filter-drawer { position: fixed; top: 0; left: 0; bottom: 0; width: 420px; max-width: 90vw; background: linear-gradient(180deg, #0a1f4d 0%, #061a3f 100%); border-right: 1px solid rgba(107, 164, 255, 0.2); box-shadow: 8px 0 40px rgba(0, 0, 0, 0.5); z-index: 101; display: flex; flex-direction: column; animation: slideInLeft 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+        @keyframes slideInLeft { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+        .filter-drawer-header { padding: 24px 28px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); display: flex; justify-content: space-between; align-items: center; }
+        .filter-drawer-header h3 { font-family: 'Fraunces', serif; font-size: 22px; font-weight: 500; color: #ffffff; margin: 0; letter-spacing: -0.01em; }
+        .filter-drawer-body { flex: 1; overflow-y: auto; padding: 24px 28px; }
+        .filter-drawer-footer { padding: 20px 28px; border-top: 1px solid rgba(255, 255, 255, 0.08); display: flex; gap: 12px; justify-content: flex-end; background: rgba(5, 20, 51, 0.5); }
+        .filter-row { margin-bottom: 20px; }
+        .filter-label { display: block; font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(255, 255, 255, 0.6); margin-bottom: 8px; font-weight: 500; }
+        .filter-input { width: 100%; padding: 12px 14px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; color: #ffffff; font-size: 14px; font-family: 'Inter', sans-serif; outline: none; transition: all 0.15s ease; }
+        .filter-input:focus { border-color: rgba(107, 164, 255, 0.5); background: rgba(255, 255, 255, 0.06); box-shadow: 0 0 0 3px rgba(107, 164, 255, 0.1); }
+        .filter-input::placeholder { color: rgba(255, 255, 255, 0.3); }
+        .filter-payment-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+        .filter-payment-cell { display: flex; align-items: center; gap: 6px; }
+        .filter-payment-op { font-size: 16px; font-weight: 600; color: #6ba4ff; min-width: 14px; text-align: center; font-family: 'JetBrains Mono', monospace; }
+        .filter-input-num { padding: 10px 12px; font-size: 13px; }
+        .filter-hint { display: block; margin-top: 8px; font-size: 11px; color: rgba(255, 255, 255, 0.4); font-style: italic; }
+        .filter-apply-btn { padding: 12px 22px; background: linear-gradient(135deg, #4d8eff 0%, #1546c4 100%); border: none; border-radius: 10px; color: #ffffff; font-size: 14px; font-weight: 500; cursor: pointer; font-family: 'Inter', sans-serif; }
+        .filter-apply-btn:hover { box-shadow: 0 4px 16px rgba(77, 142, 255, 0.4); }
+        .filter-reset-btn { padding: 12px 22px; background: transparent; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 10px; color: rgba(255, 255, 255, 0.7); font-size: 14px; cursor: pointer; font-family: 'Inter', sans-serif; }
+        .filter-reset-btn:hover { background: rgba(255, 255, 255, 0.05); color: #ffffff; }
+
+        /* Style for native date input dark mode */
+        input[type="date"].filter-input::-webkit-calendar-picker-indicator { filter: invert(0.8); cursor: pointer; }
+        select.filter-input { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='rgba(255,255,255,0.5)' d='M6 8L0 0h12z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; padding-right: 40px; }
+        select.filter-input option { background: #0a1f4d; color: #ffffff; }
 
         .content-section { position: relative; z-index: 10; padding: 0 56px 200px; max-width: 1400px; margin: 0 auto; }
 
@@ -697,11 +895,13 @@ export default function Dashboard() {
                   placeholder="Search member by name (first, last, or full name)..."
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') triggerAllInfoSearch(); }}
                 />
                 {searchInput && (
-                  <button className="search-clear" onClick={() => setSearchInput('')}>Clear</button>
+                  <button className="search-clear" onClick={() => { setSearchInput(''); setSearchQuery(''); setSearchResults(null); }}>Clear</button>
                 )}
               </div>
+              <button className="search-btn" onClick={triggerAllInfoSearch}>Search</button>
             </div>
 
             {/* SEARCH RESULTS in All Info */}
@@ -913,14 +1113,25 @@ export default function Dashboard() {
                 <input
                   className="search-input"
                   type="text"
-                  placeholder="Filter by member name or file (e.g. 'Alice Cassena')..."
-                  value={masterSearch}
-                  onChange={(e) => setMasterSearch(e.target.value)}
+                  placeholder="Search member by name (first, last, or full name)..."
+                  value={masterSearchInput}
+                  onChange={(e) => setMasterSearchInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') triggerMasterSearch(); }}
                 />
-                {masterSearch && (
-                  <button className="search-clear" onClick={() => setMasterSearch('')}>Clear</button>
+                {masterSearchInput && (
+                  <button className="search-clear" onClick={() => { setMasterSearchInput(''); setMasterSearch(''); }}>Clear</button>
                 )}
               </div>
+              <button className="search-btn" onClick={triggerMasterSearch}>Search</button>
+              <button className="filter-btn" onClick={openFilterDrawer}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+                </svg>
+                Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+              </button>
+              {activeFilterCount > 0 && (
+                <button className="filter-clear" onClick={clearAllFilters}>Clear all filters</button>
+              )}
             </div>
 
             <div className="master-dashboard">
@@ -936,9 +1147,9 @@ export default function Dashboard() {
                   <div className="master-section">
                     <h2 className="master-section-heading">
                       Active Members
-                      <span className="master-section-count">{filterMasterRows(masterData.activeMembers).length} of {masterData.activeMembers.length}</span>
+                      <span className="master-section-count">{fullyFilter(masterData.activeMembers, false, false).length} of {masterData.activeMembers.length}</span>
                     </h2>
-                    {filterMasterRows(masterData.activeMembers).length === 0 ? (
+                    {fullyFilter(masterData.activeMembers, false, false).length === 0 ? (
                       <div className="empty-state">No active members match the filter.</div>
                     ) : (
                       <div className="master-table-wrapper">
@@ -947,7 +1158,7 @@ export default function Dashboard() {
                             <tr>{activeColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
                           </thead>
                           <tbody>
-                            {filterMasterRows(masterData.activeMembers).map((row, i) => (
+                            {fullyFilter(masterData.activeMembers, false, false).map((row, i) => (
                               <tr key={i}>{renderMasterTableCells(row, activeColumns)}</tr>
                             ))}
                           </tbody>
@@ -960,9 +1171,9 @@ export default function Dashboard() {
                   <div className="master-section">
                     <h2 className="master-section-heading">
                       Terminated Members
-                      <span className="master-section-count">{filterMasterRows(masterData.terminatedMembers).length} of {masterData.terminatedMembers.length}</span>
+                      <span className="master-section-count">{fullyFilter(masterData.terminatedMembers, true, false).length} of {masterData.terminatedMembers.length}</span>
                     </h2>
-                    {filterMasterRows(masterData.terminatedMembers).length === 0 ? (
+                    {fullyFilter(masterData.terminatedMembers, true, false).length === 0 ? (
                       <div className="empty-state">No terminated members match the filter.</div>
                     ) : (
                       <div className="master-table-wrapper">
@@ -971,7 +1182,7 @@ export default function Dashboard() {
                             <tr>{terminatedColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
                           </thead>
                           <tbody>
-                            {filterMasterRows(masterData.terminatedMembers).map((row, i) => (
+                            {fullyFilter(masterData.terminatedMembers, true, false).map((row, i) => (
                               <tr key={i}>{renderMasterTableCells(row, terminatedColumns)}</tr>
                             ))}
                           </tbody>
@@ -984,9 +1195,9 @@ export default function Dashboard() {
                   <div className="master-section">
                     <h2 className="master-section-heading">
                       New Members
-                      <span className="master-section-count">{filterMasterRows(masterData.newMembers).length} of {masterData.newMembers.length}</span>
+                      <span className="master-section-count">{fullyFilter(masterData.newMembers, false, true).length} of {masterData.newMembers.length}</span>
                     </h2>
-                    {filterMasterRows(masterData.newMembers).length === 0 ? (
+                    {fullyFilter(masterData.newMembers, false, true).length === 0 ? (
                       <div className="empty-state">No new members match the filter.</div>
                     ) : (
                       <div className="master-table-wrapper">
@@ -995,7 +1206,7 @@ export default function Dashboard() {
                             <tr>{newColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
                           </thead>
                           <tbody>
-                            {filterMasterRows(masterData.newMembers).map((row, i) => (
+                            {fullyFilter(masterData.newMembers, false, true).map((row, i) => (
                               <tr key={i}>{renderMasterTableCells(row, newColumns)}</tr>
                             ))}
                           </tbody>
@@ -1006,6 +1217,211 @@ export default function Dashboard() {
                 </>
               )}
             </div>
+
+            {/* FILTER DRAWER */}
+            {filterDrawerOpen && (
+              <>
+                <div className="filter-overlay" onClick={() => setFilterDrawerOpen(false)} />
+                <aside className="filter-drawer">
+                  <div className="filter-drawer-header">
+                    <h3>Filter Members</h3>
+                    <button className="close-btn" onClick={() => setFilterDrawerOpen(false)}>Close</button>
+                  </div>
+
+                  <div className="filter-drawer-body">
+                    <div className="filter-row">
+                      <label className="filter-label">Plan Name</label>
+                      <input
+                        className="filter-input"
+                        type="text"
+                        placeholder="Contains..."
+                        value={draftFilters.planName}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, planName: e.target.value })}
+                      />
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Anthem ID</label>
+                      <input
+                        className="filter-input"
+                        type="text"
+                        placeholder="Contains..."
+                        value={draftFilters.anthemId}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, anthemId: e.target.value })}
+                      />
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Payment</label>
+                      <div className="filter-payment-row">
+                        <div className="filter-payment-cell">
+                          <span className="filter-payment-op">&gt;</span>
+                          <input
+                            className="filter-input filter-input-num"
+                            type="number"
+                            placeholder="Min"
+                            value={draftFilters.payment.gt}
+                            onChange={(e) => setDraftFilters({ ...draftFilters, payment: { ...draftFilters.payment, gt: e.target.value } })}
+                          />
+                        </div>
+                        <div className="filter-payment-cell">
+                          <span className="filter-payment-op">&lt;</span>
+                          <input
+                            className="filter-input filter-input-num"
+                            type="number"
+                            placeholder="Max"
+                            value={draftFilters.payment.lt}
+                            onChange={(e) => setDraftFilters({ ...draftFilters, payment: { ...draftFilters.payment, lt: e.target.value } })}
+                          />
+                        </div>
+                        <div className="filter-payment-cell">
+                          <span className="filter-payment-op">=</span>
+                          <input
+                            className="filter-input filter-input-num"
+                            type="number"
+                            placeholder="Exact"
+                            value={draftFilters.payment.eq}
+                            onChange={(e) => setDraftFilters({ ...draftFilters, payment: { ...draftFilters.payment, eq: e.target.value } })}
+                          />
+                        </div>
+                      </div>
+                      <span className="filter-hint">Tip: &ldquo;=&rdquo; overrides the range filters when set.</span>
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">City</label>
+                      <input
+                        className="filter-input"
+                        type="text"
+                        placeholder="Contains..."
+                        value={draftFilters.city}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, city: e.target.value })}
+                      />
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">State</label>
+                      <select
+                        className="filter-input"
+                        value={draftFilters.state}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, state: e.target.value })}
+                      >
+                        <option value="">All states</option>
+                        {US_STATES.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Address 1</label>
+                      <input
+                        className="filter-input"
+                        type="text"
+                        placeholder="Contains..."
+                        value={draftFilters.address1}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, address1: e.target.value })}
+                      />
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Address 2</label>
+                      <input
+                        className="filter-input"
+                        type="text"
+                        placeholder="Contains..."
+                        value={draftFilters.address2}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, address2: e.target.value })}
+                      />
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Email</label>
+                      <input
+                        className="filter-input"
+                        type="text"
+                        placeholder="Contains..."
+                        value={draftFilters.email}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, email: e.target.value })}
+                      />
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Phone</label>
+                      <input
+                        className="filter-input"
+                        type="tel"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        placeholder="Numbers only..."
+                        value={draftFilters.phone}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, phone: e.target.value.replace(/[^0-9]/g, '') })}
+                      />
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">File</label>
+                      <select
+                        className="filter-input"
+                        value={draftFilters.file}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, file: e.target.value })}
+                      >
+                        <option value="">All files</option>
+                        {fileOptions.map(f => <option key={f} value={f}>{f}</option>)}
+                      </select>
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Source System</label>
+                      <select
+                        className="filter-input"
+                        value={draftFilters.sourceSystem}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, sourceSystem: e.target.value })}
+                      >
+                        <option value="">All source systems</option>
+                        {sourceSystemOptions.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Coverage Tier</label>
+                      <input
+                        className="filter-input"
+                        type="text"
+                        placeholder="Contains..."
+                        value={draftFilters.coverageTier}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, coverageTier: e.target.value })}
+                      />
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Termination Date</label>
+                      <input
+                        className="filter-input"
+                        type="date"
+                        value={draftFilters.terminationDate}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, terminationDate: e.target.value })}
+                      />
+                      <span className="filter-hint">Only filters Terminated Members table.</span>
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Effective Date</label>
+                      <input
+                        className="filter-input"
+                        type="date"
+                        value={draftFilters.effectiveDate}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, effectiveDate: e.target.value })}
+                      />
+                      <span className="filter-hint">Only filters New Members table.</span>
+                    </div>
+                  </div>
+
+                  <div className="filter-drawer-footer">
+                    <button className="filter-reset-btn" onClick={() => setDraftFilters(emptyFilter)}>Reset</button>
+                    <button className="filter-apply-btn" onClick={applyFilters}>Apply Filters</button>
+                  </div>
+                </aside>
+              </>
+            )}
           </>
         )}
 
