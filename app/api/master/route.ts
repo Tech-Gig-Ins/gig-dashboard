@@ -154,6 +154,23 @@ function normalizeName(name: string): string {
   return String(name || '').toLowerCase().replace(/[^a-z]/g, '');
 }
 
+// Build the "Group" value from one of three possible columns.
+// Priority: Employer Name > Employer > L426 Shop. Returns '' if none populated.
+function buildGroup(
+  row: string[],
+  employerNameIdx: number,
+  employerIdx: number,
+  l426ShopIdx: number,
+): string {
+  const employerName = getCell(row, employerNameIdx);
+  if (employerName) return employerName;
+  const employer = getCell(row, employerIdx);
+  if (employer) return employer;
+  const l426Shop = getCell(row, l426ShopIdx);
+  if (l426Shop) return l426Shop;
+  return '';
+}
+
 function formatPayment(value: string): string {
   if (!value) return '-';
   const s = String(value).trim().replace(/[$,]/g, '');
@@ -212,6 +229,8 @@ function parseCSV(text: string): { headers: string[]; rows: string[][] } {
 type MemberRecord = {
   memberName: string;
   normalizedName: string;
+  group: string;
+  normalizedGroup: string;
   planName: string;
   anthemId: string;
   payment: string;
@@ -309,6 +328,11 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
     const memberFirstIdx = findCol(headers, ['member first', 'member first name'], true);
     const memberLastIdx = findCol(headers, ['member last', 'member last name'], true);
 
+    // Group columns (priority: Employer Name > Employer > L426 Shop)
+    const employerNameIdx = findCol(headers, ['employer name'], true);
+    const employerIdx = findCol(headers, ['employer'], true);
+    const l426ShopIdx = findCol(headers, ['l426 shop', 'local 426 shop'], true);
+
     const planNameIdx = findCol(headers, ['plan name', 'class/plan', 'class plan']);
     const anthemIdIdx = findCol(headers, ['anthem id']);
     const welfareIdx = findCol(headers, ['welfare amount', '426 hbf welfare due', 'welfare due']);
@@ -328,9 +352,14 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
       const normalizedName = normalizeName(memberName);
       if (!normalizedName) continue;
 
+      const group = buildGroup(row, employerNameIdx, employerIdx, l426ShopIdx);
+      const normalizedGroup = normalizeName(group); // same normalize: lowercase, strip non-alpha
+
       records.push({
         memberName,
         normalizedName,
+        group: group || '-',
+        normalizedGroup,
         planName: getCell(row, planNameIdx) || '-',
         anthemId: getCell(row, anthemIdIdx) || '-',
         payment: formatPayment(getCell(row, welfareIdx)),
@@ -353,9 +382,11 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
   }
 }
 
-// Identity key: normalized name + file classification
-function identityKey(record: { normalizedName: string; file: string }): string {
-  return `${record.normalizedName}|${record.file}`;
+// Identity key: normalized name + file classification + normalized group
+// Group inclusion means "same name + same file but different employer" = different identity.
+// If group is empty/missing in both compared rows, group component is just empty string (still matches).
+function identityKey(record: { normalizedName: string; file: string; normalizedGroup: string }): string {
+  return `${record.normalizedName}|${record.file}|${record.normalizedGroup}`;
 }
 
 // ========== Main handler ==========

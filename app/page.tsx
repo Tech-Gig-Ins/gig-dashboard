@@ -40,6 +40,8 @@ type TabKey = 'master' | 'all-info' | 'consultant';
 type MemberRecord = {
   memberName: string;
   normalizedName: string;
+  group: string;
+  normalizedGroup: string;
   planName: string;
   anthemId: string;
   payment: string;
@@ -252,6 +254,7 @@ export default function Dashboard() {
   // Filter draft state (what user is editing in the drawer)
   type PaymentFilter = { lt: string; gt: string; eq: string };
   type FilterState = {
+    group: string;
     planName: string;
     anthemId: string;
     payment: PaymentFilter;
@@ -264,11 +267,11 @@ export default function Dashboard() {
     file: string;
     sourceSystem: string;
     coverageTier: string;
-    terminationDate: string; // YYYY-MM-DD format
+    terminationDate: string;
     effectiveDate: string;
   };
   const emptyFilter: FilterState = {
-    planName: '', anthemId: '', payment: { lt: '', gt: '', eq: '' },
+    group: '', planName: '', anthemId: '', payment: { lt: '', gt: '', eq: '' },
     city: '', state: '', address1: '', address2: '', email: '', phone: '',
     file: '', sourceSystem: '', coverageTier: '', terminationDate: '', effectiveDate: '',
   };
@@ -400,6 +403,7 @@ export default function Dashboard() {
   function applyColumnFilters<T extends MemberRecord>(row: T, isTerminatedTable: boolean, isNewTable: boolean): boolean {
     const f = appliedFilters;
 
+    if (f.group && !row.group.toLowerCase().includes(f.group.toLowerCase())) return false;
     if (f.planName && !row.planName.toLowerCase().includes(f.planName.toLowerCase())) return false;
     if (f.anthemId && !row.anthemId.toLowerCase().includes(f.anthemId.toLowerCase())) return false;
 
@@ -475,6 +479,7 @@ export default function Dashboard() {
   // Count how many filters are active
   function countActiveFilters(f: FilterState): number {
     let count = 0;
+    if (f.group) count++;
     if (f.planName) count++;
     if (f.anthemId) count++;
     if (f.payment.lt || f.payment.gt || f.payment.eq) count++;
@@ -551,6 +556,7 @@ export default function Dashboard() {
   // Define column lists for each master section
   const activeColumns: [keyof ActiveRow, string][] = [
     ['memberName', 'Member Name'],
+    ['group', 'Group'],
     ['planName', 'Plan Name'],
     ['anthemId', 'Anthem ID'],
     ['payment', 'Payment'],
@@ -566,6 +572,7 @@ export default function Dashboard() {
   ];
   const terminatedColumns: [keyof TerminatedRow, string][] = [
     ['memberName', 'Member Name'],
+    ['group', 'Group'],
     ['planName', 'Plan Name'],
     ['anthemId', 'Anthem ID'],
     ['payment', 'Payment'],
@@ -582,6 +589,7 @@ export default function Dashboard() {
   ];
   const newColumns: [keyof NewRow, string][] = [
     ['memberName', 'Member Name'],
+    ['group', 'Group'],
     ['planName', 'Plan Name'],
     ['anthemId', 'Anthem ID'],
     ['payment', 'Payment'],
@@ -601,6 +609,7 @@ export default function Dashboard() {
     return columns.map(([key]) => {
       const val = String(row[key] ?? '-');
       if (key === 'memberName') return <td key={String(key)} className="cell-name">{val}</td>;
+      if (key === 'group') return <td key={String(key)} className="cell-group">{val}</td>;
       if (key === 'planName') return <td key={String(key)} className="cell-plan">{val}</td>;
       if (key === 'payment') return <td key={String(key)} className="cell-amount">{val}</td>;
       if (key === 'file') return <td key={String(key)}><span className="cell-pill">{val}</span></td>;
@@ -658,6 +667,13 @@ export default function Dashboard() {
           white-space: normal;
           word-wrap: break-word;
           min-width: 180px;
+        }
+        .master-table td.cell-group {
+          text-align: left;
+          white-space: normal;
+          word-wrap: break-word;
+          min-width: 200px;
+          color: rgba(255, 255, 255, 0.9);
         }
         .master-table td.cell-plan {
           text-align: left;
@@ -1155,7 +1171,7 @@ export default function Dashboard() {
                       <div className="master-table-wrapper">
                         <table className="master-table">
                           <thead>
-                            <tr>{activeColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
+                            <tr>{activeColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
                           </thead>
                           <tbody>
                             {fullyFilter(masterData.activeMembers, false, false).map((row, i) => (
@@ -1179,7 +1195,7 @@ export default function Dashboard() {
                       <div className="master-table-wrapper">
                         <table className="master-table">
                           <thead>
-                            <tr>{terminatedColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
+                            <tr>{terminatedColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
                           </thead>
                           <tbody>
                             {fullyFilter(masterData.terminatedMembers, true, false).map((row, i) => (
@@ -1203,7 +1219,7 @@ export default function Dashboard() {
                       <div className="master-table-wrapper">
                         <table className="master-table">
                           <thead>
-                            <tr>{newColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
+                            <tr>{newColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
                           </thead>
                           <tbody>
                             {fullyFilter(masterData.newMembers, false, true).map((row, i) => (
@@ -1229,6 +1245,17 @@ export default function Dashboard() {
                   </div>
 
                   <div className="filter-drawer-body">
+                    <div className="filter-row">
+                      <label className="filter-label">Group</label>
+                      <input
+                        className="filter-input"
+                        type="text"
+                        placeholder="Contains..."
+                        value={draftFilters.group}
+                        onChange={(e) => setDraftFilters({ ...draftFilters, group: e.target.value })}
+                      />
+                    </div>
+
                     <div className="filter-row">
                       <label className="filter-label">Plan Name</label>
                       <input
