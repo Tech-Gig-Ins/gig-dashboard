@@ -609,9 +609,11 @@ export default function Dashboard() {
     // Numeric and date columns default to descending (big/newest first). Text defaults to ascending (A-Z).
     const defaultDir: 'asc' | 'desc' = (type === 'numeric' || type === 'date') ? 'desc' : 'asc';
 
+    // Show spinner IMMEDIATELY (synchronous state update triggers a render before sort runs).
     setSortingFlag(true);
-    // Delay both the state update and the flag reset so React renders the spinner first,
-    // then applies the new sort, then hides the spinner. ~350ms total feels responsive without being sluggish.
+
+    // Defer the sort itself to the next tick so React commits the spinner-visible render first.
+    // Without this, React might batch both state updates and skip the intermediate "sorting" frame.
     setTimeout(() => {
       if (!current || current.column !== column) {
         setSortState({ column, direction: defaultDir });
@@ -621,8 +623,8 @@ export default function Dashboard() {
         setSortState(null);
       }
       // Hide spinner shortly after the sort is applied
-      setTimeout(() => setSortingFlag(false), 200);
-    }, 150);
+      setTimeout(() => setSortingFlag(false), 250);
+    }, 0);
   }
 
   // Small arrow indicator shown next to header text
@@ -993,7 +995,6 @@ export default function Dashboard() {
           gap: 14px;
           z-index: 5;
           border-radius: 16px;
-          animation: sortSpinnerFadeIn 0.15s ease;
           pointer-events: none;
         }
         @keyframes sortSpinnerFadeIn { from { opacity: 0; } to { opacity: 1; } }
