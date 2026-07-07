@@ -306,6 +306,11 @@ export default function Dashboard() {
   const [terminatedSort, setTerminatedSort] = useState<SortState>(null);
   const [newSort, setNewSort] = useState<SortState>(null);
 
+  // Sort-in-progress spinner state per table. Set to true briefly on each sort click for visual feedback.
+  const [activeSorting, setActiveSorting] = useState(false);
+  const [terminatedSorting, setTerminatedSorting] = useState(false);
+  const [newSorting, setNewSorting] = useState(false);
+
   // Consultant tab state
   const [consultantSearchInput, setConsultantSearchInput] = useState('');
   const [consultantSearch, setConsultantSearch] = useState('');
@@ -591,18 +596,33 @@ export default function Dashboard() {
     });
   }
 
-  // Click handler: cycles unsorted -> default-direction -> reverse-direction -> unsorted
-  function toggleSort(column: string, current: SortState, setSortState: (s: SortState) => void) {
+  // Click handler: cycles unsorted -> default-direction -> reverse-direction -> unsorted.
+  // Also briefly flips a "sorting" flag so the table shows a spinner for visual feedback,
+  // since the actual sort finishes in milliseconds and would otherwise feel instantaneous with no signal.
+  function toggleSort(
+    column: string,
+    current: SortState,
+    setSortState: (s: SortState) => void,
+    setSortingFlag: (b: boolean) => void,
+  ) {
     const type = COLUMN_TYPES[column] || 'text';
     // Numeric and date columns default to descending (big/newest first). Text defaults to ascending (A-Z).
     const defaultDir: 'asc' | 'desc' = (type === 'numeric' || type === 'date') ? 'desc' : 'asc';
-    if (!current || current.column !== column) {
-      setSortState({ column, direction: defaultDir });
-    } else if (current.direction === defaultDir) {
-      setSortState({ column, direction: defaultDir === 'asc' ? 'desc' : 'asc' });
-    } else {
-      setSortState(null);
-    }
+
+    setSortingFlag(true);
+    // Delay both the state update and the flag reset so React renders the spinner first,
+    // then applies the new sort, then hides the spinner. ~350ms total feels responsive without being sluggish.
+    setTimeout(() => {
+      if (!current || current.column !== column) {
+        setSortState({ column, direction: defaultDir });
+      } else if (current.direction === defaultDir) {
+        setSortState({ column, direction: defaultDir === 'asc' ? 'desc' : 'asc' });
+      } else {
+        setSortState(null);
+      }
+      // Hide spinner shortly after the sort is applied
+      setTimeout(() => setSortingFlag(false), 200);
+    }, 150);
   }
 
   // Small arrow indicator shown next to header text
@@ -954,6 +974,43 @@ export default function Dashboard() {
           font-weight: 700;
           font-size: 13px;
           display: inline-block;
+        }
+
+        /* Sort spinner overlay: shown briefly on top of the table while sorting */
+        .master-table-wrapper.sortable-wrapper { position: relative; }
+        .sort-spinner-overlay {
+          position: absolute;
+          inset: 0;
+          background: rgba(5, 20, 51, 0.55);
+          backdrop-filter: blur(2px);
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 14px;
+          z-index: 5;
+          border-radius: 16px;
+          animation: sortSpinnerFadeIn 0.15s ease;
+        }
+        @keyframes sortSpinnerFadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .sort-spinner {
+          width: 42px;
+          height: 42px;
+          border-radius: 50%;
+          border: 3px solid rgba(107, 164, 255, 0.15);
+          border-top-color: #6ba4ff;
+          animation: sortSpinnerRotate 0.7s linear infinite;
+        }
+        @keyframes sortSpinnerRotate {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        .sort-spinner-label {
+          font-size: 11px;
+          letter-spacing: 0.2em;
+          text-transform: uppercase;
+          color: rgba(107, 164, 255, 0.9);
+          font-weight: 500;
         }
         .master-table td {
           padding: 24px 30px !important;
@@ -1542,14 +1599,20 @@ export default function Dashboard() {
                     {fullyFilter(masterData.activeMembers, false, false).length === 0 ? (
                       <div className="empty-state">No active members match the filter.</div>
                     ) : (
-                      <div className="master-table-wrapper">
+                      <div className="master-table-wrapper sortable-wrapper">
+                        {activeSorting && (
+                          <div className="sort-spinner-overlay">
+                            <div className="sort-spinner" />
+                            <div className="sort-spinner-label">Sorting...</div>
+                          </div>
+                        )}
                         <table className="master-table">
                           <thead>
                             <tr>{activeColumns.map(([key, label]) => (
                               <th
                                 key={String(key)}
                                 className={`sortable-header ${key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}`}
-                                onClick={() => toggleSort(String(key), activeSort, setActiveSort)}
+                                onClick={() => toggleSort(String(key), activeSort, setActiveSort, setActiveSorting)}
                               >
                                 {label}
                                 <SortArrow column={String(key)} sortState={activeSort} />
@@ -1575,14 +1638,20 @@ export default function Dashboard() {
                     {fullyFilter(masterData.terminatedMembers, true, false).length === 0 ? (
                       <div className="empty-state">No terminated members match the filter.</div>
                     ) : (
-                      <div className="master-table-wrapper">
+                      <div className="master-table-wrapper sortable-wrapper">
+                        {terminatedSorting && (
+                          <div className="sort-spinner-overlay">
+                            <div className="sort-spinner" />
+                            <div className="sort-spinner-label">Sorting...</div>
+                          </div>
+                        )}
                         <table className="master-table">
                           <thead>
                             <tr>{terminatedColumns.map(([key, label]) => (
                               <th
                                 key={String(key)}
                                 className={`sortable-header ${key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}`}
-                                onClick={() => toggleSort(String(key), terminatedSort, setTerminatedSort)}
+                                onClick={() => toggleSort(String(key), terminatedSort, setTerminatedSort, setTerminatedSorting)}
                               >
                                 {label}
                                 <SortArrow column={String(key)} sortState={terminatedSort} />
@@ -1608,14 +1677,20 @@ export default function Dashboard() {
                     {fullyFilter(masterData.newMembers, false, true).length === 0 ? (
                       <div className="empty-state">No new members match the filter.</div>
                     ) : (
-                      <div className="master-table-wrapper">
+                      <div className="master-table-wrapper sortable-wrapper">
+                        {newSorting && (
+                          <div className="sort-spinner-overlay">
+                            <div className="sort-spinner" />
+                            <div className="sort-spinner-label">Sorting...</div>
+                          </div>
+                        )}
                         <table className="master-table">
                           <thead>
                             <tr>{newColumns.map(([key, label]) => (
                               <th
                                 key={String(key)}
                                 className={`sortable-header ${key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}`}
-                                onClick={() => toggleSort(String(key), newSort, setNewSort)}
+                                onClick={() => toggleSort(String(key), newSort, setNewSort, setNewSorting)}
                               >
                                 {label}
                                 <SortArrow column={String(key)} sortState={newSort} />
