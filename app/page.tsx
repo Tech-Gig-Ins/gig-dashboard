@@ -976,8 +976,11 @@ export default function Dashboard() {
           display: inline-block;
         }
 
-        /* Sort spinner overlay: shown briefly on top of the table while sorting */
-        .master-table-wrapper.sortable-wrapper { position: relative; }
+        /* Sort spinner overlay: shown briefly on top of the table while sorting.
+           The outer .sortable-outer div is position:relative and is a sibling of the scrolling
+           master-table-wrapper, so the overlay covers the visible table area regardless of
+           internal scroll position. */
+        .sortable-outer { position: relative; }
         .sort-spinner-overlay {
           position: absolute;
           inset: 0;
@@ -991,6 +994,7 @@ export default function Dashboard() {
           z-index: 5;
           border-radius: 16px;
           animation: sortSpinnerFadeIn 0.15s ease;
+          pointer-events: none;
         }
         @keyframes sortSpinnerFadeIn { from { opacity: 0; } to { opacity: 1; } }
         .sort-spinner {
@@ -1599,14 +1603,15 @@ export default function Dashboard() {
                     {fullyFilter(masterData.activeMembers, false, false).length === 0 ? (
                       <div className="empty-state">No active members match the filter.</div>
                     ) : (
-                      <div className="master-table-wrapper sortable-wrapper">
+                      <div className="sortable-outer">
                         {activeSorting && (
                           <div className="sort-spinner-overlay">
                             <div className="sort-spinner" />
                             <div className="sort-spinner-label">Sorting...</div>
                           </div>
                         )}
-                        <table className="master-table">
+                        <div className="master-table-wrapper">
+                          <table className="master-table">
                           <thead>
                             <tr>{activeColumns.map(([key, label]) => (
                               <th
@@ -1625,6 +1630,7 @@ export default function Dashboard() {
                             ))}
                           </tbody>
                         </table>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1638,14 +1644,15 @@ export default function Dashboard() {
                     {fullyFilter(masterData.terminatedMembers, true, false).length === 0 ? (
                       <div className="empty-state">No terminated members match the filter.</div>
                     ) : (
-                      <div className="master-table-wrapper sortable-wrapper">
+                      <div className="sortable-outer">
                         {terminatedSorting && (
                           <div className="sort-spinner-overlay">
                             <div className="sort-spinner" />
                             <div className="sort-spinner-label">Sorting...</div>
                           </div>
                         )}
-                        <table className="master-table">
+                        <div className="master-table-wrapper">
+                          <table className="master-table">
                           <thead>
                             <tr>{terminatedColumns.map(([key, label]) => (
                               <th
@@ -1664,6 +1671,7 @@ export default function Dashboard() {
                             ))}
                           </tbody>
                         </table>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1677,14 +1685,15 @@ export default function Dashboard() {
                     {fullyFilter(masterData.newMembers, false, true).length === 0 ? (
                       <div className="empty-state">No new members match the filter.</div>
                     ) : (
-                      <div className="master-table-wrapper sortable-wrapper">
+                      <div className="sortable-outer">
                         {newSorting && (
                           <div className="sort-spinner-overlay">
                             <div className="sort-spinner" />
                             <div className="sort-spinner-label">Sorting...</div>
                           </div>
                         )}
-                        <table className="master-table">
+                        <div className="master-table-wrapper">
+                          <table className="master-table">
                           <thead>
                             <tr>{newColumns.map(([key, label]) => (
                               <th
@@ -1703,6 +1712,7 @@ export default function Dashboard() {
                             ))}
                           </tbody>
                         </table>
+                        </div>
                       </div>
                     )}
                   </div>
