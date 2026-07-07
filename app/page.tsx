@@ -1,6 +1,27 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
+import { CONSULTANT_ROWS, UNIQUE_CONSULTANTS, REPORT_MONTH, type ConsultantRow } from './data/consultantData';
+import * as XLSX from 'xlsx';
+
+// Group name -> consultant lookup (built once from the static consultant data).
+// If a group appears under multiple consultants (rare), first one wins.
+const GROUP_TO_CONSULTANT: Map<string, string> = new Map();
+for (const r of CONSULTANT_ROWS) {
+  if (r.normalizedGroup && !GROUP_TO_CONSULTANT.has(r.normalizedGroup)) {
+    GROUP_TO_CONSULTANT.set(r.normalizedGroup, r.consultant);
+  }
+}
+
+function normalizeGroupName(s: string): string {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function getConsultantForGroup(group: string): string {
+  if (!group || group === '-') return '-';
+  const norm = normalizeGroupName(group);
+  return GROUP_TO_CONSULTANT.get(norm) || '-';
+}
 
 type FileRow = {
   key: string;
@@ -278,6 +299,22 @@ export default function Dashboard() {
   const [draftFilters, setDraftFilters] = useState<FilterState>(emptyFilter);
   const [appliedFilters, setAppliedFilters] = useState<FilterState>(emptyFilter);
 
+  // Sort state per Master Dashboard table (independent for Active / Terminated / New).
+  // null = unsorted (backend default order). Toggle cycles: unsorted -> default-dir -> reverse -> unsorted.
+  type SortState = { column: string; direction: 'asc' | 'desc' } | null;
+  const [activeSort, setActiveSort] = useState<SortState>(null);
+  const [terminatedSort, setTerminatedSort] = useState<SortState>(null);
+  const [newSort, setNewSort] = useState<SortState>(null);
+
+  // Consultant tab state
+  const [consultantSearchInput, setConsultantSearchInput] = useState('');
+  const [consultantSearch, setConsultantSearch] = useState('');
+  const [consultantFilterOpen, setConsultantFilterOpen] = useState(false);
+  type ConsultantFilterState = { consultant: string; group: string };
+  const emptyConsultantFilter: ConsultantFilterState = { consultant: '', group: '' };
+  const [draftConsultantFilters, setDraftConsultantFilters] = useState<ConsultantFilterState>(emptyConsultantFilter);
+  const [appliedConsultantFilters, setAppliedConsultantFilters] = useState<ConsultantFilterState>(emptyConsultantFilter);
+
   useEffect(() => {
     setMounted(true);
     fetch('/api/files')
@@ -366,9 +403,10 @@ export default function Dashboard() {
     setSearchQuery(q);
   }
 
-  // Master data lazy load when tab becomes active
+  // Master data lazy load when master OR consultant tab becomes active
+  // (Consultant tab's top table shows Active Members enriched with a Consultant column.)
   useEffect(() => {
-    if (activeTab !== 'master') return;
+    if (activeTab !== 'master' && activeTab !== 'consultant') return;
     if (masterData !== null) return;
     setMasterLoading(true);
     setMasterError(null);
@@ -407,7 +445,7 @@ export default function Dashboard() {
     if (f.planName && !row.planName.toLowerCase().includes(f.planName.toLowerCase())) return false;
     if (f.anthemId && !row.anthemId.toLowerCase().includes(f.anthemId.toLowerCase())) return false;
 
-    // Payment: parse cell value ($1,234.56 → 1234.56)
+    // Payment: parse cell value ($1,234.56 -> 1234.56)
     if (f.payment.lt || f.payment.gt || f.payment.eq) {
       const raw = String(row.payment).replace(/[$,]/g, '');
       const num = parseFloat(raw);
@@ -476,6 +514,105 @@ export default function Dashboard() {
     return afterSearch.filter(r => applyColumnFilters(r, isTerminatedTable, isNewTable));
   }
 
+  // ==================== SORT LOGIC ====================
+  // Column type map: how to compare values in each column when sorting.
+  type SortableType = 'numeric' | 'date' | 'text';
+  const COLUMN_TYPES: Record<string, SortableType> = {
+    memberName: 'text',
+    group: 'text',
+    planName: 'text',
+    anthemId: 'text',       // treated as text (localeCompare with numeric option handles digit runs)
+    payment: 'numeric',
+    city: 'text',
+    state: 'text',
+    address1: 'text',
+    address2: 'text',
+    email: 'text',
+    phone: 'text',          // formats vary, keep text
+    file: 'text',
+    sourceSystem: 'text',
+    coverageTier: 'text',
+    terminationDate: 'date',
+    effectiveDate: 'date',
+    consultant: 'text',     // used on Consultant Report tab
+  };
+
+  // Parse MM/DD/YYYY string into a comparable timestamp. Returns NaN if unparseable.
+  function parseMdyToTimestamp(s: string): number {
+    const parts = String(s).trim().split('/');
+    if (parts.length !== 3) return NaN;
+    const m = parseInt(parts[0], 10);
+    const d = parseInt(parts[1], 10);
+    const y = parseInt(parts[2], 10);
+    if (!m || !d || !y) return NaN;
+    return new Date(y, m - 1, d).getTime();
+  }
+
+  // Return true if the value counts as "missing" (should sort to bottom in both directions).
+  function isMissingSortValue(v: any): boolean {
+    return v === undefined || v === null || v === '' || v === '-';
+  }
+
+  function sortRows<T extends Record<string, any>>(rows: T[], sortState: SortState): T[] {
+    if (!sortState) return rows;
+    const { column, direction } = sortState;
+    const type = COLUMN_TYPES[column] || 'text';
+    const sign = direction === 'asc' ? 1 : -1;
+
+    return [...rows].sort((a, b) => {
+      const av = a[column];
+      const bv = b[column];
+      const aMissing = isMissingSortValue(av);
+      const bMissing = isMissingSortValue(bv);
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;    // missing always at bottom
+      if (bMissing) return -1;
+
+      if (type === 'numeric') {
+        const anum = parseFloat(String(av).replace(/[$,]/g, ''));
+        const bnum = parseFloat(String(bv).replace(/[$,]/g, ''));
+        if (isNaN(anum) && isNaN(bnum)) return 0;
+        if (isNaN(anum)) return 1;
+        if (isNaN(bnum)) return -1;
+        return sign * (anum - bnum);
+      }
+
+      if (type === 'date') {
+        const at = parseMdyToTimestamp(String(av));
+        const bt = parseMdyToTimestamp(String(bv));
+        if (isNaN(at) && isNaN(bt)) return 0;
+        if (isNaN(at)) return 1;
+        if (isNaN(bt)) return -1;
+        return sign * (at - bt);
+      }
+
+      // text: case-insensitive with natural-number handling (so "abc10" > "abc2")
+      return sign * String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' });
+    });
+  }
+
+  // Click handler: cycles unsorted -> default-direction -> reverse-direction -> unsorted
+  function toggleSort(column: string, current: SortState, setSortState: (s: SortState) => void) {
+    const type = COLUMN_TYPES[column] || 'text';
+    // Numeric and date columns default to descending (big/newest first). Text defaults to ascending (A-Z).
+    const defaultDir: 'asc' | 'desc' = (type === 'numeric' || type === 'date') ? 'desc' : 'asc';
+    if (!current || current.column !== column) {
+      setSortState({ column, direction: defaultDir });
+    } else if (current.direction === defaultDir) {
+      setSortState({ column, direction: defaultDir === 'asc' ? 'desc' : 'asc' });
+    } else {
+      setSortState(null);
+    }
+  }
+
+  // Small arrow indicator shown next to header text
+  function SortArrow({ column, sortState }: { column: string; sortState: SortState }) {
+    if (!sortState || sortState.column !== column) {
+      return <span className="sort-arrow-empty">↕</span>;
+    }
+    return <span className="sort-arrow-active">{sortState.direction === 'asc' ? '↑' : '↓'}</span>;
+  }
+
   // Count how many filters are active
   function countActiveFilters(f: FilterState): number {
     let count = 0;
@@ -534,6 +671,55 @@ export default function Dashboard() {
     setDraftFilters(appliedFilters);
     setFilterDrawerOpen(true);
   }
+
+  // ==================== CONSULTANT TAB HELPERS ====================
+  function triggerConsultantSearch() {
+    setConsultantSearch(consultantSearchInput.trim());
+  }
+
+  function applyConsultantFilters() {
+    setAppliedConsultantFilters(draftConsultantFilters);
+    setConsultantFilterOpen(false);
+  }
+
+  function clearAllConsultantFilters() {
+    setDraftConsultantFilters(emptyConsultantFilter);
+    setAppliedConsultantFilters(emptyConsultantFilter);
+  }
+
+  function openConsultantFilterDrawer() {
+    setDraftConsultantFilters(appliedConsultantFilters);
+    setConsultantFilterOpen(true);
+  }
+
+  function countActiveConsultantFilters(f: ConsultantFilterState): number {
+    let c = 0;
+    if (f.consultant) c++;
+    if (f.group) c++;
+    return c;
+  }
+
+  function filterConsultantRows(rows: ConsultantRow[]): ConsultantRow[] {
+    const f = appliedConsultantFilters;
+    const q = consultantSearch.trim().toLowerCase();
+    const normalizedQ = q.replace(/[^a-z0-9]/g, '');
+
+    return rows.filter(r => {
+      // Search: matches consultant OR group (normalized substring)
+      if (normalizedQ.length > 0) {
+        const matchesConsultant = r.normalizedConsultant.includes(normalizedQ);
+        const matchesGroup = r.normalizedGroup.includes(normalizedQ);
+        if (!matchesConsultant && !matchesGroup) return false;
+      }
+      // Consultant filter: exact match
+      if (f.consultant && r.consultant !== f.consultant) return false;
+      // Group filter: contains
+      if (f.group && !r.group.toLowerCase().includes(f.group.toLowerCase())) return false;
+      return true;
+    });
+  }
+
+  const activeConsultantFilterCount = countActiveConsultantFilters(appliedConsultantFilters);
 
   const sortedMonthKeys = Object.keys(grouped)
     .filter((k) => {
@@ -618,6 +804,107 @@ export default function Dashboard() {
     });
   }
 
+  // ==================== ACTIVE MEMBERS + CONSULTANT COLUMN (top table on Consultant tab) ====================
+  // Same 14 columns as activeColumns, plus a leading "Consultant" column derived from the group lookup.
+  const activeWithConsultantColumns: [string, string][] = [
+    ['consultant', 'Consultant'],
+    ['memberName', 'Member Name'],
+    ['group', 'Group'],
+    ['planName', 'Plan Name'],
+    ['anthemId', 'Anthem ID'],
+    ['payment', 'Payment'],
+    ['city', 'City'],
+    ['state', 'State'],
+    ['address1', 'Address 1'],
+    ['address2', 'Address 2'],
+    ['email', 'Email'],
+    ['phone', 'Phone'],
+    ['file', 'File'],
+    ['sourceSystem', 'Source System'],
+    ['coverageTier', 'Coverage Tier'],
+  ];
+
+  function renderActiveWithConsultantCells(row: ActiveRow): React.ReactNode {
+    return activeWithConsultantColumns.map(([key]) => {
+      if (key === 'consultant') {
+        const c = getConsultantForGroup(row.group);
+        return (
+          <td key="consultant" className="cell-consultant-lookup">
+            {c === '-' ? <span className="cell-consultant-empty">-</span> : <span className="cell-pill cell-pill-alt">{c}</span>}
+          </td>
+        );
+      }
+      const val = String((row as any)[key] ?? '-');
+      if (key === 'memberName') return <td key={key} className="cell-name">{val}</td>;
+      if (key === 'group') return <td key={key} className="cell-group">{val}</td>;
+      if (key === 'planName') return <td key={key} className="cell-plan">{val}</td>;
+      if (key === 'payment') return <td key={key} className="cell-amount">{val}</td>;
+      if (key === 'file') return <td key={key}><span className="cell-pill">{val}</span></td>;
+      if (key === 'sourceSystem') return <td key={key}><span className="cell-pill cell-pill-alt">{val}</span></td>;
+      return <td key={key}>{val}</td>;
+    });
+  }
+
+  // Filter for the top table on Consultant tab. Uses the consultant tab's own search + filters.
+  function filteredActiveWithConsultant(rows: ActiveRow[]): ActiveRow[] {
+    const f = appliedConsultantFilters;
+    const q = consultantSearch.trim().toLowerCase();
+    const normalizedQ = q.replace(/[^a-z0-9]/g, '');
+
+    return rows.filter(r => {
+      // Search: match consultant (from lookup), group, or member name
+      if (normalizedQ.length > 0) {
+        const consultantForRow = getConsultantForGroup(r.group);
+        const matchesConsultant = consultantForRow !== '-' && normalizeGroupName(consultantForRow).includes(normalizedQ);
+        const matchesGroup = r.normalizedGroup.includes(normalizedQ);
+        const matchesMember = r.normalizedName.includes(normalizedQ);
+        if (!matchesConsultant && !matchesGroup && !matchesMember) return false;
+      }
+      // Consultant filter: exact match against lookup value
+      if (f.consultant) {
+        const consultantForRow = getConsultantForGroup(r.group);
+        if (consultantForRow !== f.consultant) return false;
+      }
+      // Group filter: contains
+      if (f.group && !r.group.toLowerCase().includes(f.group.toLowerCase())) return false;
+      return true;
+    });
+  }
+
+  // Download both tables (top: Active Members with Consultant, bottom: Consultant/Group pairs)
+  // as a single .xlsx with two sheets. Uses whatever the current filters + search yield.
+  function downloadConsultantExcel() {
+    if (!masterData) {
+      alert('Master data still loading. Please wait a moment and try again.');
+      return;
+    }
+    try {
+      const wb = XLSX.utils.book_new();
+
+      // Sheet 1: Active Members with Consultant
+      const activeHeaders = activeWithConsultantColumns.map(c => c[1]);
+      const activeRowsArr = filteredActiveWithConsultant(masterData.activeMembers).map(row =>
+        activeWithConsultantColumns.map(([key]) => {
+          if (key === 'consultant') return getConsultantForGroup(row.group);
+          return String((row as any)[key] ?? '');
+        })
+      );
+      const ws1 = XLSX.utils.aoa_to_sheet([activeHeaders, ...activeRowsArr]);
+      XLSX.utils.book_append_sheet(wb, ws1, 'Active Members');
+
+      // Sheet 2: Consultant/Group pairs
+      const pairHeaders = ['Consultant', 'Group'];
+      const pairRows = filterConsultantRows(CONSULTANT_ROWS).map(r => [r.consultant, r.group]);
+      const ws2 = XLSX.utils.aoa_to_sheet([pairHeaders, ...pairRows]);
+      XLSX.utils.book_append_sheet(wb, ws2, 'Consultant Groups');
+
+      const today = new Date().toISOString().slice(0, 10);
+      XLSX.writeFile(wb, `consultant-report-${today}.xlsx`);
+    } catch (e: any) {
+      alert(`Excel export failed: ${e.message || 'Unknown error'}`);
+    }
+  }
+
   return (
     <main className="dashboard-root">
       <style jsx global>{`
@@ -646,6 +933,28 @@ export default function Dashboard() {
         }
         .master-table th:last-child { border-right: none; }
         .master-table th.col-name-header { text-align: left; }
+        .master-table th.sortable-header {
+          cursor: pointer;
+          user-select: none;
+          transition: background 0.15s ease, color 0.15s ease;
+        }
+        .master-table th.sortable-header:hover {
+          background: rgba(107, 164, 255, 0.18);
+          color: #ffffff;
+        }
+        .sort-arrow-empty {
+          opacity: 0.28;
+          margin-left: 6px;
+          font-size: 11px;
+          display: inline-block;
+        }
+        .sort-arrow-active {
+          color: #6ba4ff;
+          margin-left: 6px;
+          font-weight: 700;
+          font-size: 13px;
+          display: inline-block;
+        }
         .master-table td {
           padding: 24px 30px !important;
           color: rgba(255, 255, 255, 0.85);
@@ -702,6 +1011,57 @@ export default function Dashboard() {
           border-color: rgba(180, 130, 255, 0.25);
           color: #b482ff;
         }
+
+        /* Consultant table styles */
+        .consultant-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 14px; color: rgba(255, 255, 255, 0.9); font-family: 'Inter', sans-serif; }
+        .consultant-table thead th {
+          background: rgba(5, 20, 51, 0.95);
+          color: rgba(255, 255, 255, 0.7);
+          font-size: 11px;
+          letter-spacing: 0.15em;
+          text-transform: uppercase;
+          font-weight: 600;
+          text-align: left;
+          padding: 18px 30px !important;
+          border-bottom: 2px solid rgba(107, 164, 255, 0.3);
+          position: sticky;
+          top: 0;
+          z-index: 2;
+        }
+        .consultant-table tbody tr {
+          transition: background 0.15s ease;
+        }
+        .consultant-table tbody tr:hover td {
+          background: rgba(107, 164, 255, 0.06);
+        }
+        .consultant-table td {
+          padding: 14px 30px !important;
+          vertical-align: middle;
+          border-bottom: 1px dotted rgba(255, 255, 255, 0.06);
+        }
+        .consultant-table tr:last-child td { border-bottom: none; }
+        .consultant-table td.cell-consultant {
+          font-weight: 600;
+          color: #ffffff;
+          width: 30%;
+          border-right: 1px dotted rgba(255, 255, 255, 0.08);
+        }
+        .consultant-table td.cell-c-group {
+          color: rgba(255, 255, 255, 0.85);
+        }
+        .consultant-table .empty-c-row {
+          text-align: center;
+          color: rgba(255, 255, 255, 0.4);
+          padding: 40px !important;
+          font-style: italic;
+        }
+
+        /* Consultant lookup cell (in Active Members top table) */
+        .master-table td.cell-consultant-lookup {
+          text-align: left;
+          min-width: 140px;
+        }
+        .cell-consultant-empty { color: rgba(255, 255, 255, 0.3); }
       `}</style>
 
       <style jsx>{`
@@ -753,6 +1113,10 @@ export default function Dashboard() {
         .filter-btn:hover { background: rgba(180, 130, 255, 0.22); border-color: rgba(180, 130, 255, 0.5); color: #ffffff; }
         .filter-clear { padding: 14px 18px; background: transparent; border: 1px solid rgba(255, 100, 100, 0.3); border-radius: 12px; color: #ff8888; font-size: 13px; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; white-space: nowrap; }
         .filter-clear:hover { background: rgba(255, 100, 100, 0.1); color: #ffffff; }
+        .download-excel-btn { display: flex; align-items: center; gap: 8px; padding: 14px 20px; background: rgba(74, 222, 128, 0.12); border: 1px solid rgba(74, 222, 128, 0.35); border-radius: 12px; color: #4ade80; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; white-space: nowrap; }
+        .download-excel-btn:hover { background: rgba(74, 222, 128, 0.22); border-color: rgba(74, 222, 128, 0.6); color: #ffffff; box-shadow: 0 4px 16px rgba(74, 222, 128, 0.2); }
+        .download-excel-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .download-excel-btn:disabled:hover { background: rgba(74, 222, 128, 0.12); border-color: rgba(74, 222, 128, 0.35); color: #4ade80; box-shadow: none; }
 
         /* Filter drawer */
         .filter-overlay { position: fixed; inset: 0; background: rgba(5, 20, 51, 0.6); backdrop-filter: blur(4px); z-index: 100; animation: fadeIn 0.2s ease; }
@@ -797,7 +1161,17 @@ export default function Dashboard() {
         .master-meta-row { font-size: 12px; letter-spacing: 0.1em; color: rgba(255, 255, 255, 0.4); margin-bottom: 16px; }
 
         .master-table-wrapper { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: auto; max-height: 65vh; backdrop-filter: blur(20px); }
-        /* Master table th/td styles live in <style jsx global> block above */
+
+        /* Consultant tab specific containers */
+        .consultant-dashboard { opacity: 0; transform: translateY(20px); animation: ${mounted ? 'fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards' : 'none'}; }
+        .consultant-meta-row { font-size: 12px; letter-spacing: 0.1em; color: rgba(255, 255, 255, 0.4); margin-bottom: 16px; }
+        .consultant-count-line { color: rgba(255, 255, 255, 0.55); font-size: 13px; margin-bottom: 16px; padding-left: 4px; }
+        .consultant-count-line strong { color: #6ba4ff; font-weight: 600; }
+        .consultant-table-wrapper { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: auto; max-height: 70vh; backdrop-filter: blur(20px); }
+        .consultant-section { margin-bottom: 56px; }
+        .consultant-section-heading { font-family: 'Fraunces', serif; font-size: 28px; font-weight: 500; color: #ffffff; margin: 0 0 20px; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 20px; }
+        .consultant-section-heading::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(107, 164, 255, 0.4) 0%, transparent 100%); }
+        .consultant-section-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); font-weight: 500; }
 
         .month-block { margin-bottom: 56px; }
         .month-heading { font-family: 'Fraunces', serif; font-size: 36px; font-weight: 500; color: #ffffff; margin: 0 0 24px; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 20px; }
@@ -1171,10 +1545,19 @@ export default function Dashboard() {
                       <div className="master-table-wrapper">
                         <table className="master-table">
                           <thead>
-                            <tr>{activeColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
+                            <tr>{activeColumns.map(([key, label]) => (
+                              <th
+                                key={String(key)}
+                                className={`sortable-header ${key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}`}
+                                onClick={() => toggleSort(String(key), activeSort, setActiveSort)}
+                              >
+                                {label}
+                                <SortArrow column={String(key)} sortState={activeSort} />
+                              </th>
+                            ))}</tr>
                           </thead>
                           <tbody>
-                            {fullyFilter(masterData.activeMembers, false, false).map((row, i) => (
+                            {sortRows(fullyFilter(masterData.activeMembers, false, false), activeSort).map((row, i) => (
                               <tr key={i}>{renderMasterTableCells(row, activeColumns)}</tr>
                             ))}
                           </tbody>
@@ -1195,10 +1578,19 @@ export default function Dashboard() {
                       <div className="master-table-wrapper">
                         <table className="master-table">
                           <thead>
-                            <tr>{terminatedColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
+                            <tr>{terminatedColumns.map(([key, label]) => (
+                              <th
+                                key={String(key)}
+                                className={`sortable-header ${key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}`}
+                                onClick={() => toggleSort(String(key), terminatedSort, setTerminatedSort)}
+                              >
+                                {label}
+                                <SortArrow column={String(key)} sortState={terminatedSort} />
+                              </th>
+                            ))}</tr>
                           </thead>
                           <tbody>
-                            {fullyFilter(masterData.terminatedMembers, true, false).map((row, i) => (
+                            {sortRows(fullyFilter(masterData.terminatedMembers, true, false), terminatedSort).map((row, i) => (
                               <tr key={i}>{renderMasterTableCells(row, terminatedColumns)}</tr>
                             ))}
                           </tbody>
@@ -1219,10 +1611,19 @@ export default function Dashboard() {
                       <div className="master-table-wrapper">
                         <table className="master-table">
                           <thead>
-                            <tr>{newColumns.map(([key, label]) => <th key={String(key)} className={key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>)}</tr>
+                            <tr>{newColumns.map(([key, label]) => (
+                              <th
+                                key={String(key)}
+                                className={`sortable-header ${key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}`}
+                                onClick={() => toggleSort(String(key), newSort, setNewSort)}
+                              >
+                                {label}
+                                <SortArrow column={String(key)} sortState={newSort} />
+                              </th>
+                            ))}</tr>
                           </thead>
                           <tbody>
-                            {fullyFilter(masterData.newMembers, false, true).map((row, i) => (
+                            {sortRows(fullyFilter(masterData.newMembers, false, true), newSort).map((row, i) => (
                               <tr key={i}>{renderMasterTableCells(row, newColumns)}</tr>
                             ))}
                           </tbody>
@@ -1454,10 +1855,169 @@ export default function Dashboard() {
 
         {/* CONSULTANT REPORT TAB */}
         {activeTab === 'consultant' && (
-          <div className="coming-soon">
-            <h2>Consultant Report</h2>
-            <p>Coming soon</p>
-          </div>
+          <>
+            <div className="search-bar">
+              <div className="search-wrapper">
+                <svg className="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input
+                  className="search-input"
+                  type="text"
+                  placeholder="Search by group name, consultant, or member..."
+                  value={consultantSearchInput}
+                  onChange={(e) => setConsultantSearchInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') triggerConsultantSearch(); }}
+                />
+                {consultantSearchInput && (
+                  <button className="search-clear" onClick={() => { setConsultantSearchInput(''); setConsultantSearch(''); }}>Clear</button>
+                )}
+              </div>
+              <button className="search-btn" onClick={triggerConsultantSearch}>Search</button>
+              <button className="filter-btn" onClick={openConsultantFilterDrawer}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+                </svg>
+                Filters{activeConsultantFilterCount > 0 ? ` (${activeConsultantFilterCount})` : ''}
+              </button>
+              {activeConsultantFilterCount > 0 && (
+                <button className="filter-clear" onClick={clearAllConsultantFilters}>Clear all filters</button>
+              )}
+              <button className="download-excel-btn" onClick={downloadConsultantExcel} disabled={!masterData} title="Download both tables as an Excel file">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Download Excel
+              </button>
+            </div>
+
+            <div className="consultant-dashboard">
+              <div className="consultant-meta-row">
+                Report month: {REPORT_MONTH} · {UNIQUE_CONSULTANTS.length} consultants · {CONSULTANT_ROWS.length} consultant/group pairs
+              </div>
+
+              {/* TOP TABLE: Active Members with Consultant column */}
+              <div className="consultant-section">
+                <h2 className="consultant-section-heading">
+                  Active Members with Consultant
+                  {masterData && (
+                    <span className="consultant-section-count">
+                      {filteredActiveWithConsultant(masterData.activeMembers).length} of {masterData.activeMembers.length}
+                    </span>
+                  )}
+                </h2>
+
+                {masterLoading && <div className="loading-state">Loading active members, this may take 10-30 seconds...</div>}
+                {masterError && <div className="error-state">Error: {masterError}</div>}
+                {!masterLoading && !masterError && masterData && (() => {
+                  const filtered = filteredActiveWithConsultant(masterData.activeMembers);
+                  if (filtered.length === 0) {
+                    return <div className="empty-state">No active members match the search or filters.</div>;
+                  }
+                  return (
+                    <div className="master-table-wrapper">
+                      <table className="master-table">
+                        <thead>
+                          <tr>{activeWithConsultantColumns.map(([key, label]) => (
+                            <th key={key} className={key === 'consultant' || key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>
+                          ))}</tr>
+                        </thead>
+                        <tbody>
+                          {filtered.map((row, i) => (
+                            <tr key={i}>{renderActiveWithConsultantCells(row)}</tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* BOTTOM TABLE: Consultant-Group pairs */}
+              <div className="consultant-section">
+                <h2 className="consultant-section-heading">
+                  Consultant / Group Directory
+                  <span className="consultant-section-count">
+                    {filterConsultantRows(CONSULTANT_ROWS).length} of {CONSULTANT_ROWS.length}
+                  </span>
+                </h2>
+                {(() => {
+                  const filtered = filterConsultantRows(CONSULTANT_ROWS);
+                  if (filtered.length === 0) {
+                    return <div className="empty-state">No results match the search or filters.</div>;
+                  }
+                  return (
+                    <div className="consultant-table-wrapper">
+                      <table className="consultant-table">
+                        <thead>
+                          <tr>
+                            <th>Consultant</th>
+                            <th>Group</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filtered.map((r, idx) => (
+                            <tr key={`${r.consultant}-${r.group}-${idx}`}>
+                              <td className="cell-consultant">{r.consultant}</td>
+                              <td className="cell-c-group">{r.group}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* FILTER DRAWER for consultant tab */}
+            {consultantFilterOpen && (
+              <>
+                <div className="filter-overlay" onClick={() => setConsultantFilterOpen(false)} />
+                <aside className="filter-drawer">
+                  <div className="filter-drawer-header">
+                    <h3>Filter Consultants</h3>
+                    <button className="close-btn" onClick={() => setConsultantFilterOpen(false)}>Close</button>
+                  </div>
+
+                  <div className="filter-drawer-body">
+                    <div className="filter-row">
+                      <label className="filter-label">Consultant</label>
+                      <select
+                        className="filter-input"
+                        value={draftConsultantFilters.consultant}
+                        onChange={(e) => setDraftConsultantFilters({ ...draftConsultantFilters, consultant: e.target.value })}
+                      >
+                        <option value="">All consultants</option>
+                        {UNIQUE_CONSULTANTS.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                      <span className="filter-hint">Applies to both tables.</span>
+                    </div>
+
+                    <div className="filter-row">
+                      <label className="filter-label">Group</label>
+                      <input
+                        className="filter-input"
+                        type="text"
+                        placeholder="Contains..."
+                        value={draftConsultantFilters.group}
+                        onChange={(e) => setDraftConsultantFilters({ ...draftConsultantFilters, group: e.target.value })}
+                      />
+                      <span className="filter-hint">Applies to both tables.</span>
+                    </div>
+                  </div>
+
+                  <div className="filter-drawer-footer">
+                    <button className="filter-reset-btn" onClick={() => setDraftConsultantFilters(emptyConsultantFilter)}>Reset</button>
+                    <button className="filter-apply-btn" onClick={applyConsultantFilters}>Apply Filters</button>
+                  </div>
+                </aside>
+              </>
+            )}
+          </>
         )}
       </section>
 
