@@ -2618,7 +2618,7 @@ export default function Dashboard() {
                     const countLabel = typeof cells[countRowIdx]?.[0] === 'string' ? cells[countRowIdx][0] as string : '';
                     const warning = warningRowIdx >= 0 && typeof cells[warningRowIdx]?.[0] === 'string' ? cells[warningRowIdx][0] as string : '';
                     const header = (cells[headerRowIdx] || []).filter(c => c !== null) as string[];
-                    const dataRows: CellValue[][] = [];
+                    const dataRows: BillingCellValue[][] = [];
                     for (let i = headerRowIdx + 1; i < cells.length; i++) {
                       const row = cells[i];
                       if (!row || row.every(c => c === null)) continue;
@@ -2631,7 +2631,7 @@ export default function Dashboard() {
                     // Compute totals in JavaScript for the money columns (indexes 2, 3, 4).
                     const moneyColIndexes = [2, 3, 4];
                     const hasTotal = dataRows.length > 0;
-                    const computedTotal: CellValue[] = header.map((_, j) => {
+                    const computedTotal: BillingCellValue[] = header.map((_, j) => {
                       if (j === 1) return 'TOTAL';
                       if (moneyColIndexes.includes(j)) {
                         let sum = 0;
@@ -2718,7 +2718,7 @@ export default function Dashboard() {
                       }
                     }
                     const bHeader = breakdownHeaderIdx >= 0 ? (cells[breakdownHeaderIdx] || []).filter(c => c !== null) as string[] : [];
-                    const bData: CellValue[][] = [];
+                    const bData: BillingCellValue[][] = [];
                     if (breakdownHeaderIdx >= 0) {
                       for (let i = breakdownHeaderIdx + 1; i < cells.length; i++) {
                         const row = cells[i];
@@ -2729,7 +2729,7 @@ export default function Dashboard() {
                       }
                     }
                     // Compute totals in JavaScript. Col 0 = "TOTAL OWED" label, col 1 = amount sum, col 2 = count sum.
-                    const bTotalComputed: CellValue[] = bHeader.map((_, j) => {
+                    const bTotalComputed: BillingCellValue[] = bHeader.map((_, j) => {
                       if (j === 0) return 'TOTAL OWED';
                       if (j === 1 || j === 2) {
                         let sum = 0;
