@@ -2215,141 +2215,6 @@ export default function Dashboard() {
               )}
             </div>
 
-            {/* UPLOAD FILES MODAL */}
-            {uploadModalOpen && (
-              <>
-                <div className="upload-modal-overlay" onClick={closeUploadModal} />
-                <div className="upload-modal">
-                  <div className="upload-modal-header">
-                    <h3>Upload Files to S3</h3>
-                    <button className="close-btn" onClick={closeUploadModal}>Close</button>
-                  </div>
-
-                  <div className="upload-modal-controls">
-                    <label className="upload-month-label">Month &amp; Year:</label>
-                    <select
-                      className="upload-select"
-                      value={uploadMonth}
-                      onChange={e => setUploadMonth(parseInt(e.target.value, 10))}
-                    >
-                      {MONTH_NAMES.map((n, i) => (
-                        <option key={i} value={i}>{n}</option>
-                      ))}
-                    </select>
-                    <select
-                      className="upload-select"
-                      value={uploadYear}
-                      onChange={e => setUploadYear(parseInt(e.target.value, 10))}
-                    >
-                      {[2024, 2025, 2026, 2027, 2028].map(y => (
-                        <option key={y} value={y}>{y}</option>
-                      ))}
-                    </select>
-                    <span className="upload-hint">Applies to all files below</span>
-                  </div>
-
-                  <div className="upload-modal-body">
-                    <table className="upload-table">
-                      <thead>
-                        <tr>
-                          <th className="upload-col-name">File</th>
-                          <th className="upload-col-file">Choose file</th>
-                          <th className="upload-col-action">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {CANONICAL_FILES.map(label => {
-                          const file = uploadRowFiles[label] || null;
-                          const status: UploadRowStatus = uploadRowStatus[label] || { kind: 'idle' };
-                          return (
-                            <tr key={label}>
-                              <td className="upload-col-name">{label}</td>
-                              <td className="upload-col-file">
-                                <label className="file-picker-btn">
-                                  Choose file
-                                  <input
-                                    type="file"
-                                    accept=".xlsx,.xls,.csv"
-                                    onChange={e => handleRowFileChange(label, e.target.files?.[0] || null)}
-                                    disabled={status.kind === 'checking' || status.kind === 'uploading'}
-                                    style={{ display: 'none' }}
-                                  />
-                                </label>
-                                {file && <span className="file-picker-name" title={file.name}>{file.name}</span>}
-                              </td>
-                              <td className="upload-col-action">
-                                {!file && status.kind === 'idle' && (
-                                  <span className="upload-status-muted">-</span>
-                                )}
-                                {file && status.kind === 'idle' && (
-                                  <button className="upload-row-btn" onClick={() => handleRowUpload(label)}>
-                                    Upload
-                                  </button>
-                                )}
-                                {status.kind === 'checking' && (
-                                  <span className="upload-status-progress">Checking...</span>
-                                )}
-                                {status.kind === 'uploading' && (
-                                  <span className="upload-status-progress">Uploading...</span>
-                                )}
-                                {status.kind === 'exists' && (
-                                  <div className="upload-exists-prompt">
-                                    <div className="upload-exists-msg">
-                                      {status.existingFiles.length} matching file{status.existingFiles.length === 1 ? '' : 's'} found for {MONTH_NAMES[uploadMonth]} {uploadYear}. Pick one to override:
-                                    </div>
-                                    <ul className="upload-existing-list">
-                                      {status.existingFiles.map(f => (
-                                        <li key={f.key} className="upload-existing-row">
-                                          <a
-                                            href={`/api/master/download-existing?key=${encodeURIComponent(f.key)}`}
-                                            download
-                                            className="upload-existing-link"
-                                            title={f.key}
-                                          >
-                                            {f.filename}
-                                          </a>
-                                          <span className="upload-existing-size">({formatBytes(f.size)})</span>
-                                          <button
-                                            className="upload-row-btn upload-override-btn"
-                                            onClick={() => handleRowOverrideOne(label, f.key)}
-                                          >
-                                            Override this
-                                          </button>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                    <div className="upload-exists-actions">
-                                      <button className="upload-row-btn upload-cancel-btn" onClick={() => handleRowCancelOverride(label)}>
-                                        Cancel
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-                                {status.kind === 'success' && (
-                                  <span className="upload-status-success">
-                                    ✓ {status.overridden ? 'Replaced' : 'Uploaded'} as {status.renamedTo}
-                                  </span>
-                                )}
-                                {status.kind === 'error' && (
-                                  <span className="upload-status-error">
-                                    Error: {status.message}
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div className="upload-modal-footer">
-                    <button className="close-btn" onClick={closeUploadModal}>Close</button>
-                  </div>
-                </div>
-              </>
-            )}
-
             {/* FILTER DRAWER */}
             {filterDrawerOpen && (
               <>
@@ -3360,6 +3225,141 @@ export default function Dashboard() {
           </svg>
         </div>
       </div>
+
+      {/* UPLOAD FILES MODAL - rendered at root level so it's available from any tab */}
+      {uploadModalOpen && (
+        <>
+          <div className="upload-modal-overlay" onClick={closeUploadModal} />
+          <div className="upload-modal">
+            <div className="upload-modal-header">
+              <h3>Upload Files to S3</h3>
+              <button className="close-btn" onClick={closeUploadModal}>Close</button>
+            </div>
+
+            <div className="upload-modal-controls">
+              <label className="upload-month-label">Month &amp; Year:</label>
+              <select
+                className="upload-select"
+                value={uploadMonth}
+                onChange={e => setUploadMonth(parseInt(e.target.value, 10))}
+              >
+                {MONTH_NAMES.map((n, i) => (
+                  <option key={i} value={i}>{n}</option>
+                ))}
+              </select>
+              <select
+                className="upload-select"
+                value={uploadYear}
+                onChange={e => setUploadYear(parseInt(e.target.value, 10))}
+              >
+                {[2024, 2025, 2026, 2027, 2028].map(y => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+              <span className="upload-hint">Applies to all files below</span>
+            </div>
+
+            <div className="upload-modal-body">
+              <table className="upload-table">
+                <thead>
+                  <tr>
+                    <th className="upload-col-name">File</th>
+                    <th className="upload-col-file">Choose file</th>
+                    <th className="upload-col-action">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {CANONICAL_FILES.map(label => {
+                    const file = uploadRowFiles[label] || null;
+                    const status: UploadRowStatus = uploadRowStatus[label] || { kind: 'idle' };
+                    return (
+                      <tr key={label}>
+                        <td className="upload-col-name">{label}</td>
+                        <td className="upload-col-file">
+                          <label className="file-picker-btn">
+                            Choose file
+                            <input
+                              type="file"
+                              accept=".xlsx,.xls,.csv"
+                              onChange={e => handleRowFileChange(label, e.target.files?.[0] || null)}
+                              disabled={status.kind === 'checking' || status.kind === 'uploading'}
+                              style={{ display: 'none' }}
+                            />
+                          </label>
+                          {file && <span className="file-picker-name" title={file.name}>{file.name}</span>}
+                        </td>
+                        <td className="upload-col-action">
+                          {!file && status.kind === 'idle' && (
+                            <span className="upload-status-muted">-</span>
+                          )}
+                          {file && status.kind === 'idle' && (
+                            <button className="upload-row-btn" onClick={() => handleRowUpload(label)}>
+                              Upload
+                            </button>
+                          )}
+                          {status.kind === 'checking' && (
+                            <span className="upload-status-progress">Checking...</span>
+                          )}
+                          {status.kind === 'uploading' && (
+                            <span className="upload-status-progress">Uploading...</span>
+                          )}
+                          {status.kind === 'exists' && (
+                            <div className="upload-exists-prompt">
+                              <div className="upload-exists-msg">
+                                {status.existingFiles.length} matching file{status.existingFiles.length === 1 ? '' : 's'} found for {MONTH_NAMES[uploadMonth]} {uploadYear}. Pick one to override:
+                              </div>
+                              <ul className="upload-existing-list">
+                                {status.existingFiles.map(f => (
+                                  <li key={f.key} className="upload-existing-row">
+                                    <a
+                                      href={`/api/master/download-existing?key=${encodeURIComponent(f.key)}`}
+                                      download
+                                      className="upload-existing-link"
+                                      title={f.key}
+                                    >
+                                      {f.filename}
+                                    </a>
+                                    <span className="upload-existing-size">({formatBytes(f.size)})</span>
+                                    <button
+                                      className="upload-row-btn upload-override-btn"
+                                      onClick={() => handleRowOverrideOne(label, f.key)}
+                                    >
+                                      Override this
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                              <div className="upload-exists-actions">
+                                <button className="upload-row-btn upload-cancel-btn" onClick={() => handleRowCancelOverride(label)}>
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          {status.kind === 'success' && (
+                            <span className="upload-status-success">
+                              ✓ {status.overridden ? 'Replaced' : 'Uploaded'} as {status.renamedTo}
+                            </span>
+                          )}
+                          {status.kind === 'error' && (
+                            <span className="upload-status-error">
+                              Error: {status.message}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="upload-modal-footer">
+              <button className="close-btn" onClick={closeUploadModal}>Close</button>
+            </div>
+          </div>
+        </>
+      )}
     </main>
   );
 }
