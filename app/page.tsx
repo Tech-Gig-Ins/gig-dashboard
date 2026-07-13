@@ -84,6 +84,10 @@ type MasterData = {
   activeMembers: ActiveRow[];
   terminatedMembers: TerminatedRow[];
   newMembers: NewRow[];
+  latestMonthLabel: string | null;
+  previousMonthLabel: string | null;
+  latestMonthMissingFiles: string[];
+  previousMonthMissingFiles: string[];
 };
 
 const MONTH_NAMES = [
@@ -265,6 +269,40 @@ export default function Dashboard() {
   const [masterLoading, setMasterLoading] = useState(false);
   const [masterError, setMasterError] = useState<string | null>(null);
 
+  // Upload files modal state
+  const CANONICAL_FILES = [
+    'Cassena Remittance',
+    'Cassena Credits',
+    'EP6 Remittance',
+    'NYP Remittance',
+    'BDSB Remittance',
+    'BDSB Credits',
+    'Corechoice T1',
+    'Corechoice T3',
+    'Gig Remittance',
+    'Gig Credits',
+    'Delta Dental',
+    'GWU3 Remittance',
+    'GWU3 Credits',
+    'Northstead Remittance',
+    'Northstead Credits',
+    'Refresh',
+    'Enroll Confidently or PIOPAC',
+  ];
+  type UploadRowStatus =
+    | { kind: 'idle' }
+    | { kind: 'checking' }
+    | { kind: 'exists'; existingFiles: { key: string; size: number; lastModified: string | null; filename: string }[] }
+    | { kind: 'uploading' }
+    | { kind: 'success'; renamedTo: string; overridden: boolean }
+    | { kind: 'error'; message: string };
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const now = new Date();
+  const [uploadMonth, setUploadMonth] = useState<number>(now.getMonth());
+  const [uploadYear, setUploadYear] = useState<number>(now.getFullYear());
+  const [uploadRowFiles, setUploadRowFiles] = useState<Record<string, File | null>>({});
+  const [uploadRowStatus, setUploadRowStatus] = useState<Record<string, UploadRowStatus>>({});
+
   // Master search uses a "draft" input + a "committed" query (only updates on Search click / Enter)
   const [masterSearchInput, setMasterSearchInput] = useState('');
   const [masterSearch, setMasterSearch] = useState('');
@@ -351,8 +389,11 @@ export default function Dashboard() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setMounted(true);
+  // Load the All Info files listing. Extracted from useEffect so we can refresh
+  // it after new files are uploaded via the upload modal.
+  function loadAllFilesData() {
+    setLoading(true);
+    setError(null);
     fetch('/api/files')
       .then((res) => {
         if (!res.ok) throw new Error(`API returned ${res.status}`);
@@ -367,6 +408,11 @@ export default function Dashboard() {
         setError(e.message || 'Failed to load files');
         setLoading(false);
       });
+  }
+
+  useEffect(() => {
+    setMounted(true);
+    loadAllFilesData();
   }, []);
 
   async function handleDownload(fileKey: string, filename: string) {
@@ -1115,6 +1161,100 @@ export default function Dashboard() {
     }
   }
 
+  // ========== Upload modal handlers ==========
+  function openUploadModal() {
+    // Reset state each time so a re-open starts fresh
+    setUploadRowFiles({});
+    setUploadRowStatus({});
+    setUploadModalOpen(true);
+  }
+  function closeUploadModal() {
+    // If any row completed a successful upload, refresh downstream data:
+    // - All Info tab (list of files in S3)
+    // - Master Dashboard (identity + missing-files derived from those files)
+    // Setting masterData to null causes the master useEffect to refetch next time
+    // that tab is visited.
+    const uploadedAny = Object.values(uploadRowStatus).some(s => s && s.kind === 'success');
+    setUploadModalOpen(false);
+    if (uploadedAny) {
+      loadAllFilesData();
+      setMasterData(null);
+    }
+  }
+  function handleRowFileChange(label: string, file: File | null) {
+    setUploadRowFiles(prev => ({ ...prev, [label]: file }));
+    // Reset status when a new file is picked
+    setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'idle' } }));
+  }
+  function extractExt(name: string): string {
+    const i = name.lastIndexOf('.');
+    return i >= 0 ? name.slice(i).toLowerCase() : '.xlsx';
+  }
+  async function doUpload(label: string, override: boolean, overrideKey?: string) {
+    const file = uploadRowFiles[label];
+    if (!file) return;
+    setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'uploading' } }));
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('canonicalLabel', label);
+      fd.append('month', String(uploadMonth));
+      fd.append('year', String(uploadYear));
+      fd.append('override', override ? 'true' : 'false');
+      if (overrideKey) fd.append('overrideKey', overrideKey);
+      const res = await fetch('/api/master/upload', { method: 'POST', body: fd });
+      const body = await res.json();
+      if (!res.ok) {
+        setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'error', message: body.error || 'Upload failed' } }));
+        return;
+      }
+      setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'success', renamedTo: body.renamedTo, overridden: !!body.overridden } }));
+    } catch (err: any) {
+      setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'error', message: err.message || 'Network error' } }));
+    }
+  }
+  async function handleRowUpload(label: string) {
+    const file = uploadRowFiles[label];
+    if (!file) return;
+    setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'checking' } }));
+    try {
+      const res = await fetch('/api/master/upload-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          canonicalLabel: label,
+          month: uploadMonth,
+          year: uploadYear,
+          ext: extractExt(file.name),
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'error', message: body.error || 'Check failed' } }));
+        return;
+      }
+      if (body.exists && Array.isArray(body.existingFiles) && body.existingFiles.length > 0) {
+        setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'exists', existingFiles: body.existingFiles } }));
+        return;
+      }
+      // No existing files - upload straight away
+      await doUpload(label, false);
+    } catch (err: any) {
+      setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'error', message: err.message || 'Network error' } }));
+    }
+  }
+  function handleRowOverrideOne(label: string, overrideKey: string) {
+    doUpload(label, true, overrideKey);
+  }
+  function handleRowCancelOverride(label: string) {
+    setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'idle' } }));
+  }
+  function formatBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+
   return (
     <main className="dashboard-root">
       <style jsx global>{`
@@ -1410,6 +1550,56 @@ export default function Dashboard() {
         .master-section-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); font-weight: 500; }
         .master-meta-row { font-size: 12px; letter-spacing: 0.1em; color: rgba(255, 255, 255, 0.4); margin-bottom: 16px; }
 
+        .master-missing-files { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; padding: 12px 16px; margin: 0 0 16px; background: rgba(255, 165, 0, 0.06); border: 1px solid rgba(255, 165, 0, 0.25); border-left: 3px solid rgba(255, 165, 0, 0.7); border-radius: 8px; font-size: 13px; color: rgba(255, 220, 180, 0.9); }
+        .master-missing-label { font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; color: rgba(255, 180, 100, 0.95); }
+        .master-missing-list { color: rgba(255, 235, 210, 0.85); }
+        .master-missing-files-none { background: rgba(80, 200, 120, 0.05); border-color: rgba(80, 200, 120, 0.25); border-left-color: rgba(80, 200, 120, 0.7); color: rgba(180, 240, 200, 0.9); font-style: italic; font-size: 12px; }
+
+        /* Upload Files button lives in the All Info search bar */
+        .upload-files-wrap { display: inline-flex; flex-direction: column; align-items: center; gap: 4px; margin-left: 8px; }
+        .upload-files-btn { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.4); padding: 8px 18px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; }
+        .upload-files-btn:hover { background: rgba(107, 164, 255, 0.25); border-color: rgba(107, 164, 255, 0.7); }
+        .upload-files-hint { font-size: 10px; color: rgba(255, 255, 255, 0.4); letter-spacing: 0.03em; font-style: italic; text-align: center; }
+        .upload-modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(3px); z-index: 90; animation: fadeIn 0.2s ease; }
+        .upload-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(1000px, 92vw); max-height: 88vh; background: #0a1e42; border: 1px solid rgba(107, 164, 255, 0.3); border-radius: 16px; z-index: 100; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5); animation: fadeIn 0.2s ease; }
+        .upload-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 26px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+        .upload-modal-header h3 { margin: 0; font-family: 'Fraunces', serif; font-size: 22px; font-weight: 500; color: #ffffff; }
+        .upload-modal-controls { display: flex; align-items: center; gap: 12px; padding: 16px 26px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); background: rgba(107, 164, 255, 0.04); }
+        .upload-month-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.15em; color: rgba(255, 255, 255, 0.6); font-weight: 600; }
+        .upload-select { background: rgba(5, 20, 51, 0.9); color: #ffffff; border: 1px solid rgba(107, 164, 255, 0.3); padding: 6px 10px; border-radius: 4px; font-family: 'Inter', sans-serif; font-size: 13px; cursor: pointer; }
+        .upload-hint { font-size: 11px; color: rgba(255, 255, 255, 0.4); font-style: italic; margin-left: 8px; }
+        .upload-modal-body { padding: 8px 26px 8px; overflow-y: auto; flex: 1; }
+        .upload-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .upload-table thead th { text-align: left; padding: 12px 8px; color: rgba(255, 255, 255, 0.6); font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; border-bottom: 1px solid rgba(255, 255, 255, 0.1); position: sticky; top: 0; background: #0a1e42; z-index: 1; }
+        .upload-table tbody td { padding: 10px 8px; border-bottom: 1px dotted rgba(255, 255, 255, 0.05); vertical-align: middle; }
+        .upload-table tbody tr:last-child td { border-bottom: none; }
+        .upload-col-name { width: 22%; color: rgba(255, 255, 255, 0.9); font-weight: 500; }
+        .upload-col-file { width: 33%; white-space: nowrap; }
+        .file-picker-btn { display: inline-block; background: #ffffff; color: #051433; padding: 6px 14px; border-radius: 4px; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; letter-spacing: 0.05em; cursor: pointer; border: 1px solid rgba(0, 0, 0, 0.15); transition: background 0.15s ease, box-shadow 0.15s ease; white-space: nowrap; vertical-align: middle; }
+        .file-picker-btn:hover { background: #f0f0f0; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25); }
+        .file-picker-btn:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
+        .file-picker-name { display: inline-block; margin-left: 10px; font-size: 11px; color: rgba(255, 255, 255, 0.85); font-family: 'JetBrains Mono', 'Courier New', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; vertical-align: middle; }
+        .upload-col-action { width: 45%; }
+        .upload-row-btn { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.4); padding: 5px 14px; border-radius: 4px; font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; margin-right: 6px; }
+        .upload-row-btn:hover { background: rgba(107, 164, 255, 0.25); }
+        .upload-override-btn { background: rgba(255, 165, 0, 0.15); color: #ffb055; border-color: rgba(255, 165, 0, 0.4); }
+        .upload-override-btn:hover { background: rgba(255, 165, 0, 0.25); }
+        .upload-cancel-btn { background: rgba(255, 100, 100, 0.1); color: #ff8888; border-color: rgba(255, 100, 100, 0.35); }
+        .upload-cancel-btn:hover { background: rgba(255, 100, 100, 0.2); }
+        .upload-status-muted { color: rgba(255, 255, 255, 0.3); font-size: 12px; }
+        .upload-status-progress { color: #ffb055; font-size: 12px; font-style: italic; }
+        .upload-status-success { color: #80d090; font-size: 12px; }
+        .upload-status-error { color: #ff8888; font-size: 12px; }
+        .upload-exists-prompt { display: flex; flex-direction: column; gap: 6px; }
+        .upload-exists-msg { font-size: 12px; color: rgba(255, 220, 180, 0.95); background: rgba(255, 165, 0, 0.08); border: 1px solid rgba(255, 165, 0, 0.3); padding: 6px 10px; border-radius: 4px; }
+        .upload-existing-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+        .upload-existing-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 4px; }
+        .upload-existing-size { font-size: 11px; color: rgba(255, 255, 255, 0.5); font-family: 'JetBrains Mono', 'Courier New', monospace; margin-right: auto; }
+        .upload-existing-link { color: #6ba4ff; text-decoration: underline; font-size: 12px; font-family: 'JetBrains Mono', 'Courier New', monospace; word-break: break-all; }
+        .upload-existing-link:hover { color: #90c0ff; }
+        .upload-exists-actions { display: flex; gap: 6px; margin-top: 4px; }
+        .upload-modal-footer { padding: 16px 26px; border-top: 1px solid rgba(255, 255, 255, 0.08); display: flex; justify-content: flex-end; }
+
         .master-table-wrapper { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: auto; max-height: 65vh; backdrop-filter: blur(20px); }
 
         /* Consultant tab specific containers */
@@ -1616,6 +1806,12 @@ export default function Dashboard() {
                 )}
               </div>
               <button className="search-btn" onClick={triggerAllInfoSearch}>Search</button>
+              <div className="upload-files-wrap">
+                <button className="upload-files-btn" onClick={openUploadModal}>
+                  Upload Files
+                </button>
+                <div className="upload-files-hint">access only to admin - Andrew</div>
+              </div>
             </div>
 
             {/* SEARCH RESULTS in All Info */}
@@ -1854,7 +2050,7 @@ export default function Dashboard() {
               {!masterLoading && !masterError && masterData && (
                 <>
                   <div className="master-meta-row">
-                    Months processed: {masterData.monthsProcessed.join(' · ')}
+                    <span>Months processed: {masterData.monthsProcessed.join(' · ')}</span>
                   </div>
 
                   {/* ACTIVE MEMBERS */}
@@ -1863,6 +2059,18 @@ export default function Dashboard() {
                       Active Members
                       <span className="master-section-count">{fullyFilter(masterData.activeMembers, false, false).length} of {masterData.activeMembers.length}</span>
                     </h2>
+                    {masterData.latestMonthLabel && (
+                      masterData.latestMonthMissingFiles.length > 0 ? (
+                        <div className="master-missing-files">
+                          <span className="master-missing-label">Missing files for {masterData.latestMonthLabel}:</span>
+                          <span className="master-missing-list">{masterData.latestMonthMissingFiles.join(', ')}</span>
+                        </div>
+                      ) : (
+                        <div className="master-missing-files master-missing-files-none">
+                          All 16 files present for {masterData.latestMonthLabel}.
+                        </div>
+                      )
+                    )}
                     {fullyFilter(masterData.activeMembers, false, false).length === 0 ? (
                       <div className="empty-state">No active members match the filter.</div>
                     ) : (
@@ -1904,6 +2112,18 @@ export default function Dashboard() {
                       Terminated Members
                       <span className="master-section-count">{fullyFilter(masterData.terminatedMembers, true, false).length} of {masterData.terminatedMembers.length}</span>
                     </h2>
+                    {masterData.previousMonthLabel && (
+                      masterData.previousMonthMissingFiles.length > 0 ? (
+                        <div className="master-missing-files">
+                          <span className="master-missing-label">Missing files for {masterData.previousMonthLabel}:</span>
+                          <span className="master-missing-list">{masterData.previousMonthMissingFiles.join(', ')}</span>
+                        </div>
+                      ) : (
+                        <div className="master-missing-files master-missing-files-none">
+                          All 16 files present for {masterData.previousMonthLabel}.
+                        </div>
+                      )
+                    )}
                     {fullyFilter(masterData.terminatedMembers, true, false).length === 0 ? (
                       <div className="empty-state">No terminated members match the filter.</div>
                     ) : (
@@ -1945,6 +2165,18 @@ export default function Dashboard() {
                       New Members
                       <span className="master-section-count">{fullyFilter(masterData.newMembers, false, true).length} of {masterData.newMembers.length}</span>
                     </h2>
+                    {masterData.previousMonthLabel && (
+                      masterData.previousMonthMissingFiles.length > 0 ? (
+                        <div className="master-missing-files">
+                          <span className="master-missing-label">Missing files for {masterData.previousMonthLabel}:</span>
+                          <span className="master-missing-list">{masterData.previousMonthMissingFiles.join(', ')}</span>
+                        </div>
+                      ) : (
+                        <div className="master-missing-files master-missing-files-none">
+                          All 16 files present for {masterData.previousMonthLabel}.
+                        </div>
+                      )
+                    )}
                     {fullyFilter(masterData.newMembers, false, true).length === 0 ? (
                       <div className="empty-state">No new members match the filter.</div>
                     ) : (
@@ -1982,6 +2214,141 @@ export default function Dashboard() {
                 </>
               )}
             </div>
+
+            {/* UPLOAD FILES MODAL */}
+            {uploadModalOpen && (
+              <>
+                <div className="upload-modal-overlay" onClick={closeUploadModal} />
+                <div className="upload-modal">
+                  <div className="upload-modal-header">
+                    <h3>Upload Files to S3</h3>
+                    <button className="close-btn" onClick={closeUploadModal}>Close</button>
+                  </div>
+
+                  <div className="upload-modal-controls">
+                    <label className="upload-month-label">Month &amp; Year:</label>
+                    <select
+                      className="upload-select"
+                      value={uploadMonth}
+                      onChange={e => setUploadMonth(parseInt(e.target.value, 10))}
+                    >
+                      {MONTH_NAMES.map((n, i) => (
+                        <option key={i} value={i}>{n}</option>
+                      ))}
+                    </select>
+                    <select
+                      className="upload-select"
+                      value={uploadYear}
+                      onChange={e => setUploadYear(parseInt(e.target.value, 10))}
+                    >
+                      {[2024, 2025, 2026, 2027, 2028].map(y => (
+                        <option key={y} value={y}>{y}</option>
+                      ))}
+                    </select>
+                    <span className="upload-hint">Applies to all files below</span>
+                  </div>
+
+                  <div className="upload-modal-body">
+                    <table className="upload-table">
+                      <thead>
+                        <tr>
+                          <th className="upload-col-name">File</th>
+                          <th className="upload-col-file">Choose file</th>
+                          <th className="upload-col-action">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {CANONICAL_FILES.map(label => {
+                          const file = uploadRowFiles[label] || null;
+                          const status: UploadRowStatus = uploadRowStatus[label] || { kind: 'idle' };
+                          return (
+                            <tr key={label}>
+                              <td className="upload-col-name">{label}</td>
+                              <td className="upload-col-file">
+                                <label className="file-picker-btn">
+                                  Choose file
+                                  <input
+                                    type="file"
+                                    accept=".xlsx,.xls,.csv"
+                                    onChange={e => handleRowFileChange(label, e.target.files?.[0] || null)}
+                                    disabled={status.kind === 'checking' || status.kind === 'uploading'}
+                                    style={{ display: 'none' }}
+                                  />
+                                </label>
+                                {file && <span className="file-picker-name" title={file.name}>{file.name}</span>}
+                              </td>
+                              <td className="upload-col-action">
+                                {!file && status.kind === 'idle' && (
+                                  <span className="upload-status-muted">-</span>
+                                )}
+                                {file && status.kind === 'idle' && (
+                                  <button className="upload-row-btn" onClick={() => handleRowUpload(label)}>
+                                    Upload
+                                  </button>
+                                )}
+                                {status.kind === 'checking' && (
+                                  <span className="upload-status-progress">Checking...</span>
+                                )}
+                                {status.kind === 'uploading' && (
+                                  <span className="upload-status-progress">Uploading...</span>
+                                )}
+                                {status.kind === 'exists' && (
+                                  <div className="upload-exists-prompt">
+                                    <div className="upload-exists-msg">
+                                      {status.existingFiles.length} matching file{status.existingFiles.length === 1 ? '' : 's'} found for {MONTH_NAMES[uploadMonth]} {uploadYear}. Pick one to override:
+                                    </div>
+                                    <ul className="upload-existing-list">
+                                      {status.existingFiles.map(f => (
+                                        <li key={f.key} className="upload-existing-row">
+                                          <a
+                                            href={`/api/master/download-existing?key=${encodeURIComponent(f.key)}`}
+                                            download
+                                            className="upload-existing-link"
+                                            title={f.key}
+                                          >
+                                            {f.filename}
+                                          </a>
+                                          <span className="upload-existing-size">({formatBytes(f.size)})</span>
+                                          <button
+                                            className="upload-row-btn upload-override-btn"
+                                            onClick={() => handleRowOverrideOne(label, f.key)}
+                                          >
+                                            Override this
+                                          </button>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                    <div className="upload-exists-actions">
+                                      <button className="upload-row-btn upload-cancel-btn" onClick={() => handleRowCancelOverride(label)}>
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                                {status.kind === 'success' && (
+                                  <span className="upload-status-success">
+                                    ✓ {status.overridden ? 'Replaced' : 'Uploaded'} as {status.renamedTo}
+                                  </span>
+                                )}
+                                {status.kind === 'error' && (
+                                  <span className="upload-status-error">
+                                    Error: {status.message}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="upload-modal-footer">
+                    <button className="close-btn" onClick={closeUploadModal}>Close</button>
+                  </div>
+                </div>
+              </>
+            )}
 
             {/* FILTER DRAWER */}
             {filterDrawerOpen && (

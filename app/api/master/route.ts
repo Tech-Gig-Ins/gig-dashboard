@@ -1,12 +1,12 @@
 // Located at: app/api/master/route.ts
 //
 // Builds the Master Dashboard data with three sections:
-// - activeMembers: unique members in May 2026 files
+// - activeMembers: unique members in the LATEST month available
 // - terminatedMembers: members in older month but missing from next month (term date = end of older month)
 // - newMembers: members in newer month but missing from previous month (effective date = first of newer month)
 //
-// Fetches ALL files (no month filter) so we can do month-over-month comparisons.
-// Member identity: normalized name + file classification.
+// Fetches all files from June 2026 onwards (no upper bound, so future months auto-appear
+// when their files land in S3). Member identity: normalized name + file classification + normalized group.
 
 import { NextResponse } from 'next/server';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
@@ -85,18 +85,101 @@ function detectMonthYearForFilter(filename: string): { year: number; month: numb
 // ========== File classification ==========
 type FileClassification = { fileLabel: string; sourceSystem: string };
 
+// Canonical list of the 16 files expected in each month.
+// Used both for classification labels and for detecting missing files per month.
+const CANONICAL_FILES = [
+  'Cassena Remittance',
+  'Cassena Credits',
+  'EP6 Remittance',
+  'NYP Remittance',
+  'BDSB Remittance',
+  'BDSB Credits',
+  'Corechoice T1',
+  'Corechoice T3',
+  'Gig Remittance',
+  'Gig Credits',
+  'Delta Dental',
+  'GWU3 Remittance',
+  'GWU3 Credits',
+  'Northstead Remittance',
+  'Northstead Credits',
+  'Refresh',
+  'Enroll Confidently or PIOPAC',
+] as const;
+
+// Order matters: first match wins. More specific rules go before less specific ones.
+// For carriers with Remittance/Credits variants (Cassena, BDSB, GWU3, Northstead, Gig)
+// the filename MUST contain either "remittance" or "credits" to classify - files
+// with just the carrier name (no variant keyword) fall through to "unknown" so they
+// don't get silently misclassified as Remittance.
 function classifyFile(filename: string): FileClassification {
   const lower = filename.toLowerCase();
-  if (lower.includes('corechoice direct t1') || lower.includes('corechoice_direct_t1')) return { fileLabel: 'GWU2', sourceSystem: 'Decisely' };
-  if (lower.includes('corechoice direct t3') || lower.includes('corechoice_direct_t3')) return { fileLabel: 'GWU', sourceSystem: 'Decisely' };
-  if (lower.includes('ny-practice') || lower.includes('nyp')) return { fileLabel: 'Enroll Confidently', sourceSystem: 'EP6' };
-  if (lower.includes('gwu3')) return { fileLabel: 'GWU3', sourceSystem: 'TPA' };
-  if (lower.includes('cassena')) return { fileLabel: 'Cassena', sourceSystem: 'TPA' };
-  if (lower.includes('ep6')) return { fileLabel: 'EP6', sourceSystem: 'EP6' };
-  if (lower.includes('bdsb')) return { fileLabel: 'BDSB', sourceSystem: 'TPA' };
-  if (lower.includes('northstead')) return { fileLabel: 'Northstead', sourceSystem: 'Northstead' };
-  if (lower.includes('refresh')) return { fileLabel: 'Refresh', sourceSystem: 'Refresh' };
-  if (/\bgig\b/i.test(filename) || lower.includes('_gig_') || lower.startsWith('gig')) return { fileLabel: 'GIG', sourceSystem: 'TPA' };
+  const hasRemittance = lower.includes('remittance');
+  const hasCredits = lower.includes('credits');
+
+  // Corechoice T1 / T3 (check before other rules)
+  if (lower.includes('corechoice')) {
+    if (lower.includes('t1')) return { fileLabel: 'Corechoice T1', sourceSystem: 'Decisely' };
+    if (lower.includes('t3')) return { fileLabel: 'Corechoice T3', sourceSystem: 'Decisely' };
+  }
+
+  // Delta Dental: both "delta" and "dental" present in any order
+  if (lower.includes('delta') && lower.includes('dental')) {
+    return { fileLabel: 'Delta Dental', sourceSystem: 'Delta Dental' };
+  }
+
+  // NYP: filename contains "nyp" or "ny-practice" / "ny practice"
+  if (lower.includes('nyp') || lower.includes('ny-practice') || lower.includes('ny practice')) {
+    return { fileLabel: 'NYP Remittance', sourceSystem: 'EP6' };
+  }
+
+  // Enroll Confidently OR PIOPAC (case-insensitive; filename already lowercased)
+  if (lower.includes('enroll confidently') || lower.includes('piopac')) {
+    return { fileLabel: 'Enroll Confidently or PIOPAC', sourceSystem: 'EP6' };
+  }
+
+  // Cassena (strict: must have remittance OR credits keyword)
+  if (lower.includes('cassena')) {
+    if (hasCredits) return { fileLabel: 'Cassena Credits', sourceSystem: 'TPA' };
+    if (hasRemittance) return { fileLabel: 'Cassena Remittance', sourceSystem: 'TPA' };
+    // Falls through to unknown - file has "cassena" but no variant keyword
+  }
+
+  // BDSB (strict: must have remittance OR credits keyword)
+  if (lower.includes('bdsb')) {
+    if (hasCredits) return { fileLabel: 'BDSB Credits', sourceSystem: 'TPA' };
+    if (hasRemittance) return { fileLabel: 'BDSB Remittance', sourceSystem: 'TPA' };
+  }
+
+  // GWU3 (strict: must have remittance OR credits keyword)
+  if (lower.includes('gwu3')) {
+    if (hasCredits) return { fileLabel: 'GWU3 Credits', sourceSystem: 'TPA' };
+    if (hasRemittance) return { fileLabel: 'GWU3 Remittance', sourceSystem: 'TPA' };
+  }
+
+  // Northstead (strict: must have remittance OR credits keyword) - source is TPA
+  if (lower.includes('northstead')) {
+    if (hasCredits) return { fileLabel: 'Northstead Credits', sourceSystem: 'TPA' };
+    if (hasRemittance) return { fileLabel: 'Northstead Remittance', sourceSystem: 'TPA' };
+  }
+
+  // EP6
+  if (lower.includes('ep6')) {
+    return { fileLabel: 'EP6 Remittance', sourceSystem: 'EP6' };
+  }
+
+  // Gig (Remittance / Credits) - stricter whole-word check to avoid false positives
+  // AND must have remittance or credits keyword
+  if (/\bgig\b/i.test(filename) || lower.includes('_gig_') || lower.startsWith('gig')) {
+    if (hasCredits) return { fileLabel: 'Gig Credits', sourceSystem: 'TPA' };
+    if (hasRemittance) return { fileLabel: 'Gig Remittance', sourceSystem: 'TPA' };
+  }
+
+  // Refresh
+  if (lower.includes('refresh')) {
+    return { fileLabel: 'Refresh', sourceSystem: 'Refresh' };
+  }
+
   return { fileLabel: 'unknown', sourceSystem: 'unknown' };
 }
 
@@ -249,7 +332,6 @@ type MasterActiveRow = MemberRecord;
 type MasterTerminatedRow = MemberRecord & { terminationDate: string };
 type MasterNewRow = MemberRecord & { effectiveDate: string };
 
-// monthKey: "2026-04" for May 2026 (month is 0-indexed)
 function monthKey(year: number, month: number): string {
   return `${year}-${String(month).padStart(2, '0')}`;
 }
@@ -259,7 +341,6 @@ function monthLabel(year: number, month: number): string {
 }
 
 function lastDayOfMonth(year: number, month: number): string {
-  // month 0-indexed. JavaScript trick: day 0 of next month = last day of current month
   const d = new Date(year, month + 1, 0);
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
@@ -328,7 +409,6 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
     const memberFirstIdx = findCol(headers, ['member first', 'member first name'], true);
     const memberLastIdx = findCol(headers, ['member last', 'member last name'], true);
 
-    // Group columns (priority: Employer Name > Employer > L426 Shop)
     const employerNameIdx = findCol(headers, ['employer name'], true);
     const employerIdx = findCol(headers, ['employer'], true);
     const l426ShopIdx = findCol(headers, ['l426 shop', 'local 426 shop'], true);
@@ -353,7 +433,7 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
       if (!normalizedName) continue;
 
       const group = buildGroup(row, employerNameIdx, employerIdx, l426ShopIdx);
-      const normalizedGroup = normalizeName(group); // same normalize: lowercase, strip non-alpha
+      const normalizedGroup = normalizeName(group);
 
       records.push({
         memberName,
@@ -382,9 +462,6 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
   }
 }
 
-// Identity key: normalized name + file classification + normalized group
-// Group inclusion means "same name + same file but different employer" = different identity.
-// If group is empty/missing in both compared rows, group component is just empty string (still matches).
 function identityKey(record: { normalizedName: string; file: string; normalizedGroup: string }): string {
   return `${record.normalizedName}|${record.file}|${record.normalizedGroup}`;
 }
@@ -392,13 +469,16 @@ function identityKey(record: { normalizedName: string; file: string; normalizedG
 // ========== Main handler ==========
 export async function GET() {
   try {
-    // List ALL S3 objects (no month filter, we need history for comparisons)
-    type FileInfo = { key: string; year: number; month: number };
+    // List S3 objects under the "carrier=" prefix only. This skips billing-sources/,
+    // billing-reports/, billing-updates/, and any other non-carrier folder - which is
+    // why files like Reconciliation_Output_<month>.xlsx don't show up as "unknown".
+    type FileInfo = { key: string; year: number; month: number; fileLabel: string };
     const files: FileInfo[] = [];
     let token: string | undefined = undefined;
     do {
       const cmd: ListObjectsV2Command = new ListObjectsV2Command({
         Bucket: BUCKET,
+        Prefix: 'carrier=',
         ContinuationToken: token,
       });
       const res = await s3.send(cmd);
@@ -409,23 +489,32 @@ export async function GET() {
         const filename = obj.Key.split('/').pop() || obj.Key;
         const detected = detectMonthYearForFilter(filename);
         if (!detected) continue;
-        // Include all files on or before May 2026
-        if (detected.year > 2026) continue;
-        if (detected.year === 2026 && detected.month > 4) continue; // 4 = May, skip June onwards
-        files.push({ key: obj.Key, year: detected.year, month: detected.month });
+        // Include only files from June 2026 onwards. Anything earlier is excluded.
+        if (detected.year < 2026) continue;
+        if (detected.year === 2026 && detected.month < 5) continue; // 5 = June
+        const classification = classifyFile(filename);
+        files.push({
+          key: obj.Key,
+          year: detected.year,
+          month: detected.month,
+          fileLabel: classification.fileLabel,
+        });
       }
       token = res.IsTruncated ? res.NextContinuationToken : undefined;
     } while (token);
 
-    // Group files by month
+    // Group files by month AND track which canonical file labels are present each month
     const filesByMonth: Map<string, FileInfo[]> = new Map();
+    const labelsByMonth: Map<string, Set<string>> = new Map();
     for (const f of files) {
       const mk = monthKey(f.year, f.month);
       if (!filesByMonth.has(mk)) filesByMonth.set(mk, []);
+      if (!labelsByMonth.has(mk)) labelsByMonth.set(mk, new Set<string>());
       filesByMonth.get(mk)!.push(f);
+      labelsByMonth.get(mk)!.add(f.fileLabel);
     }
 
-    // Get sorted list of month keys (oldest to newest)
+    // Sort months oldest -> newest
     const sortedMonths = Array.from(filesByMonth.keys()).sort();
 
     // Extract records for each month
@@ -435,7 +524,7 @@ export async function GET() {
       month: number;
       label: string;
       records: MemberRecord[];
-      identityMap: Map<string, MemberRecord>; // identityKey -> record
+      identityMap: Map<string, MemberRecord>;
     };
 
     const monthData: MonthData[] = [];
@@ -444,7 +533,6 @@ export async function GET() {
       const allRecordsArrays = await Promise.all(filesForMonth.map(f => extractFromFile(f.key)));
       const records = allRecordsArrays.flat();
 
-      // Build identity map (dedupe within month: keep first occurrence)
       const identityMap = new Map<string, MemberRecord>();
       for (const r of records) {
         const id = identityKey(r);
@@ -466,16 +554,15 @@ export async function GET() {
       });
     }
 
-    // ========== Active Members: members in May 2026 ==========
-    const mayKey = monthKey(2026, 4);
-    const mayData = monthData.find(m => m.mk === mayKey);
-    const activeMembers: MasterActiveRow[] = mayData
-      ? Array.from(mayData.identityMap.values())
+    // Active members = whoever is in the LATEST month with data.
+    // monthData is sorted oldest -> newest, so last element is the newest month.
+    const latestMonth = monthData.length > 0 ? monthData[monthData.length - 1] : null;
+    const activeMembers: MasterActiveRow[] = latestMonth
+      ? Array.from(latestMonth.identityMap.values())
       : [];
 
-    // ========== Terminated Members ==========
-    // For each consecutive pair (older, newer), find identities in older NOT in newer.
-    // Their termination date = last day of older month.
+    // Terminated: for each consecutive pair (older, newer), members in older NOT in newer.
+    // Termination date = last day of older month.
     const terminatedMembers: MasterTerminatedRow[] = [];
     for (let i = 0; i < monthData.length - 1; i++) {
       const older = monthData[i];
@@ -490,10 +577,8 @@ export async function GET() {
       }
     }
 
-    // ========== New Members ==========
-    // For each consecutive pair (older, newer), find identities in newer NOT in older.
-    // Their effective date = first day of newer month.
-    // Skip the oldest month (everyone in oldest is considered baseline, not new).
+    // New: for each consecutive pair (older, newer), members in newer NOT in older.
+    // Effective date = first day of newer month. Skip the oldest month entirely (baseline, not "new").
     const newMembers: MasterNewRow[] = [];
     for (let i = 1; i < monthData.length; i++) {
       const older = monthData[i - 1];
@@ -508,6 +593,19 @@ export async function GET() {
       }
     }
 
+    // Compute missing files for latest and previous months.
+    // Latest month drives the Active Members table; previous drives Terminated + New.
+    const previousMonth = monthData.length > 1 ? monthData[monthData.length - 2] : null;
+
+    const latestMonthKey = latestMonth?.mk;
+    const previousMonthKey = previousMonth?.mk;
+    const latestLabels = latestMonthKey ? (labelsByMonth.get(latestMonthKey) || new Set<string>()) : new Set<string>();
+    const previousLabels = previousMonthKey ? (labelsByMonth.get(previousMonthKey) || new Set<string>()) : new Set<string>();
+    const latestMonthMissingFiles: string[] = CANONICAL_FILES.filter(f => !latestLabels.has(f));
+    const previousMonthMissingFiles: string[] = previousMonth
+      ? CANONICAL_FILES.filter(f => !previousLabels.has(f))
+      : [];
+
     return NextResponse.json({
       monthsProcessed: sortedMonths.map(mk => {
         const [yStr, mStr] = mk.split('-');
@@ -519,6 +617,10 @@ export async function GET() {
       activeMembers,
       terminatedMembers,
       newMembers,
+      latestMonthLabel: latestMonth?.label || null,
+      previousMonthLabel: previousMonth?.label || null,
+      latestMonthMissingFiles,
+      previousMonthMissingFiles,
     });
   } catch (err: any) {
     console.error('Master dashboard error:', err);
