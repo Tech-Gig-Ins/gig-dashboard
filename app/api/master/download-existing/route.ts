@@ -50,7 +50,11 @@ export async function GET(req: NextRequest) {
     const buffer = await streamToBuffer(res.Body as any);
     const filename = key.split('/').pop() || 'download';
 
-    return new NextResponse(buffer, {
+    // Wrap in a fresh Uint8Array - Next.js 16's strict types don't accept Node's
+    // Buffer directly as BodyInit even though it works at runtime.
+    const body = new Uint8Array(buffer);
+
+    return new NextResponse(body, {
       status: 200,
       headers: {
         'Content-Type': res.ContentType || 'application/octet-stream',
