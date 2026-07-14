@@ -136,6 +136,14 @@ function detectMonthYear(filename: string): { year: number; month: number } | nu
     const year = parseInt(m2[3], 10);
     if (month >= 0 && month <= 11 && year >= 2020 && year <= 2099) return { year, month };
   }
+  // Period-separated MM.DD.YYYY (e.g. "All Refresh Enrollments 4.30.2026.csv")
+  const usDotDatePattern = /(\d{1,2})\.(\d{1,2})\.(\d{4})/;
+  const m2b = filename.match(usDotDatePattern);
+  if (m2b) {
+    const month = parseInt(m2b[1], 10) - 1;
+    const year = parseInt(m2b[3], 10);
+    if (month >= 0 && month <= 11 && year >= 2020 && year <= 2099) return { year, month };
+  }
   const isoPattern = /(\d{8})/;
   const m3 = filename.match(isoPattern);
   if (m3) {
@@ -276,19 +284,17 @@ function groupFilesBySystem(files: FileRow[]): SystemGrouped {
     const sysMatch = file.key.match(/^carrier=([^/]+)\//);
     const system = sysMatch ? sysMatch[1] : 'unknown';
     const detected = detectMonthYear(file.filename);
-    let year: number, month: number, label: string, mKey: string;
+    let year: number, month: number;
     if (detected) {
       year = detected.year;
       month = detected.month;
-      label = monthLabel(year, month);
-      mKey = monthKey(year, month);
     } else {
       const d = new Date(file.lastModified);
       year = d.getFullYear();
       month = d.getMonth();
-      label = `${monthLabel(year, month)} (from upload date)`;
-      mKey = `unknown-${monthKey(year, month)}`;
     }
+    const label = monthLabel(year, month);
+    const mKey = monthKey(year, month);
     if (!result[system]) {
       result[system] = { displayName: prettifySystemName(system), totalFiles: 0, months: {} };
     }
@@ -307,19 +313,19 @@ function groupFiles(files: FileRow[]): DoubleGrouped {
     const sysMatch = file.key.match(/^carrier=([^/]+)\//);
     const system = sysMatch ? sysMatch[1] : 'unknown';
     const detected = detectMonthYear(file.filename);
-    let year: number, month: number, label: string, mKey: string;
+    let year: number, month: number;
     if (detected) {
       year = detected.year;
       month = detected.month;
-      label = monthLabel(year, month);
-      mKey = monthKey(year, month);
     } else {
+      // Fall back to the S3 upload date so files without a detectable date in
+      // the filename still land in the correct month block alongside dated files.
       const d = new Date(file.lastModified);
       year = d.getFullYear();
       month = d.getMonth();
-      label = `${monthLabel(year, month)} (from upload date)`;
-      mKey = `unknown-${monthKey(year, month)}`;
     }
+    const label = monthLabel(year, month);
+    const mKey = monthKey(year, month);
     if (!result[mKey]) result[mKey] = { label, year, month, systems: {} };
     if (!result[mKey].systems[system]) result[mKey].systems[system] = [];
     result[mKey].systems[system].push(file);
@@ -1113,15 +1119,8 @@ export default function Dashboard() {
     });
   }
 
-  // Month-first ordering used by the All Info browse view. No hardcoded cutoff -
-  // every month returned by /api/files renders here (Feb 2026 onwards, etc.).
-  const sortedMonthKeys = Object.keys(grouped).sort((a, b) => {
-    const aUnknown = a.startsWith('unknown-');
-    const bUnknown = b.startsWith('unknown-');
-    if (aUnknown && !bUnknown) return 1;
-    if (!aUnknown && bUnknown) return -1;
-    return b.localeCompare(a);
-  });
+  // Month-first ordering used by the All Info browse view. Newest month first.
+  const sortedMonthKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
 
   // Define column lists for each master section
   const activeColumns: [keyof ActiveRow, string][] = [

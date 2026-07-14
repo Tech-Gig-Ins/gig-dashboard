@@ -61,6 +61,14 @@ function detectMonthYearForFilter(filename: string): { year: number; month: numb
     const year = parseInt(m2[3], 10);
     if (month >= 0 && month <= 11 && year >= 2020 && year <= 2099) return { year, month };
   }
+  // Period-separated MM.DD.YYYY (e.g. "All Refresh Enrollments 4.30.2026.csv")
+  const usDotDatePattern = /(\d{1,2})\.(\d{1,2})\.(\d{4})/;
+  const m2b = filename.match(usDotDatePattern);
+  if (m2b) {
+    const month = parseInt(m2b[1], 10) - 1;
+    const year = parseInt(m2b[3], 10);
+    if (month >= 0 && month <= 11 && year >= 2020 && year <= 2099) return { year, month };
+  }
 
   const isoPattern = /(\d{8})/;
   const m3 = filename.match(isoPattern);
