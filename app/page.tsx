@@ -482,6 +482,26 @@ export default function Dashboard() {
     sheets: BillingSheet[];
     message?: string;
   };
+  // Rich sheet data with formatting - used by Billing Test tab only.
+  // Field names are short to keep the JSON payload small.
+  type BillingTestCell = {
+    v: string;
+    bg?: string; fg?: string;
+    b?: boolean; i?: boolean;
+    a?: 'left' | 'center' | 'right';
+    bl?: string; br?: string; bt?: string; bb?: string;
+    rs?: number; cs?: number;
+    hidden?: boolean;
+  };
+  type BillingTestSheet = { name: string; cells: BillingTestCell[][]; columnWidths: number[] };
+  type BillingTestReport = {
+    sourceFile: string | null;
+    filename?: string;
+    approvedKey: string | null;
+    lastModified: string | null;
+    sheets: BillingTestSheet[];
+    message?: string;
+  };
   type BillingUpdate = {
     id: string;
     name: string;
@@ -506,20 +526,17 @@ export default function Dashboard() {
   // ==================== BILLING TEST TAB STATE ====================
   // Independent copy of the report so switching between Billing and Billing Test
   // doesn't force one to re-load when the other's state changes.
-  const [billingTestReport, setBillingTestReport] = useState<BillingReport | null>(null);
+  const [billingTestReport, setBillingTestReport] = useState<BillingTestReport | null>(null);
   const [billingTestLoading, setBillingTestLoading] = useState(false);
   const [billingTestError, setBillingTestError] = useState<string | null>(null);
   const [billingTestActiveSheet, setBillingTestActiveSheet] = useState<string>('');
-  // s3 key of the chat file most recently approved. When set, the top display
-  // shows THAT file instead of the default reconciliation output. Client-side
-  // only - resets when the page reloads.
-  const [billingTestApprovedKey, setBillingTestApprovedKey] = useState<string | null>(null);
   // Approval passcode modal
   const [approvalModalOpen, setApprovalModalOpen] = useState(false);
   const [approvalTargetKey, setApprovalTargetKey] = useState<string | null>(null);
   const [approvalTargetFilename, setApprovalTargetFilename] = useState<string | null>(null);
   const [approvalPasscode, setApprovalPasscode] = useState('');
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
 
   // Load the All Info files listing. Extracted from useEffect so we can refresh
   // it after new files are uploaded via the upload modal.
@@ -978,35 +995,26 @@ export default function Dashboard() {
     }
   }, [activeTab]);
 
-  // ==================== BILLING TEST DATA LOAD ====================
-  // Load whenever the tab becomes active OR the approved key changes.
-  // Chat updates are loaded via the same effect above (shared state).
+  // Manual refetch trigger for the Billing Test tab. Bumped after a successful
+  // approval so the sheet viewer reloads with the newly-approved file.
+  const [billingTestRefetchTick, setBillingTestRefetchTick] = useState(0);
+
   useEffect(() => {
     if (activeTab !== 'billing-test') return;
-    // Only trigger when we haven't already loaded, OR when the approved key
-    // differs from what's currently in the report.
-    const currentKey = billingTestReport?.sourceFile || null;
-    const desiredKey = billingTestApprovedKey; // null = default
-    if (!billingTestLoading && !billingTestError && currentKey === desiredKey && billingTestReport !== null) {
-      return;
-    }
-    // Also make sure the chat updates are loaded (same data as Billing tab)
+    // Load the chat updates if not already loaded (shared with Billing tab)
     if (updates.length === 0 && !updatesLoading && !updatesError) {
       loadUpdates();
     }
     setBillingTestLoading(true);
     setBillingTestError(null);
-    const url = billingTestApprovedKey
-      ? `/api/billing/report-file?key=${encodeURIComponent(billingTestApprovedKey)}`
-      : '/api/billing/report-file';
-    fetch(url)
+    fetch('/api/billing/report-file')
       .then(res => {
         if (!res.ok) throw new Error(`Load failed: ${res.status}`);
         return res.json();
       })
-      .then((data: BillingReport) => {
+      .then((data: BillingTestReport) => {
         setBillingTestReport(data);
-        // Default to the first sheet if the previously selected sheet doesn't exist
+        // Default to the first sheet if the previously selected one no longer exists
         if (data.sheets && data.sheets.length > 0) {
           const hasCurrent = data.sheets.some(s => s.name === billingTestActiveSheet);
           if (!hasCurrent) setBillingTestActiveSheet(data.sheets[0].name);
@@ -1017,7 +1025,7 @@ export default function Dashboard() {
         setBillingTestError(e.message || 'Failed to load report');
         setBillingTestLoading(false);
       });
-  }, [activeTab, billingTestApprovedKey]);
+  }, [activeTab, billingTestRefetchTick]);
 
   // ==================== APPROVAL FLOW ====================
   function openApprovalModal(u: BillingUpdate) {
@@ -1029,30 +1037,48 @@ export default function Dashboard() {
     setApprovalModalOpen(true);
   }
   function closeApprovalModal() {
+    if (approvalSubmitting) return; // don't close mid-submit
     setApprovalModalOpen(false);
     setApprovalTargetKey(null);
     setApprovalTargetFilename(null);
     setApprovalPasscode('');
     setApprovalError(null);
   }
-  function submitApproval() {
-    if (approvalPasscode !== 'AndrewGig') {
-      setApprovalError('Incorrect passcode');
-      return;
-    }
+  async function submitApproval() {
     if (!approvalTargetKey) {
       setApprovalError('No file selected');
       return;
     }
-    // Force a reload by resetting billingTestReport, then setting the approved key
-    setBillingTestReport(null);
-    setBillingTestApprovedKey(approvalTargetKey);
-    closeApprovalModal();
-  }
-  function resetToDefaultBillingTest() {
-    // Return to the default reconciliation file (clears any prior approval)
-    setBillingTestReport(null);
-    setBillingTestApprovedKey(null);
+    if (!approvalPasscode) {
+      setApprovalError('Enter the passcode');
+      return;
+    }
+    setApprovalSubmitting(true);
+    setApprovalError(null);
+    try {
+      const res = await fetch('/api/billing/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: approvalTargetKey, passcode: approvalPasscode }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setApprovalError(body.error || `Approval failed (${res.status})`);
+        setApprovalSubmitting(false);
+        return;
+      }
+      // Success - close modal, force refetch of the sheet viewer
+      setApprovalSubmitting(false);
+      setApprovalModalOpen(false);
+      setApprovalTargetKey(null);
+      setApprovalTargetFilename(null);
+      setApprovalPasscode('');
+      setBillingTestReport(null);
+      setBillingTestRefetchTick(t => t + 1);
+    } catch (err: any) {
+      setApprovalError(err.message || 'Network error');
+      setApprovalSubmitting(false);
+    }
   }
 
   function loadUpdates() {
@@ -1843,11 +1869,9 @@ export default function Dashboard() {
         .bt-sheet-tab { background: rgba(255, 255, 255, 0.04); color: rgba(255, 255, 255, 0.6); border: 1px solid rgba(255, 255, 255, 0.08); border-bottom: none; padding: 8px 16px; border-radius: 6px 6px 0 0; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
         .bt-sheet-tab:hover { background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.85); }
         .bt-sheet-tab.active { background: rgba(107, 164, 255, 0.2); color: #6ba4ff; border-color: rgba(107, 164, 255, 0.5); }
-        .bt-sheet-scroll { max-height: 620px; overflow: auto; }
-        .bt-sheet-table { border-collapse: collapse; font-size: 12px; font-family: 'JetBrains Mono', 'Courier New', monospace; color: rgba(255, 255, 255, 0.85); width: 100%; }
-        .bt-sheet-table td { padding: 6px 12px; border: 1px solid rgba(255, 255, 255, 0.05); white-space: nowrap; vertical-align: top; }
-        .bt-sheet-table tr:nth-child(even) td { background: rgba(255, 255, 255, 0.015); }
-        .bt-sheet-table tr:hover td { background: rgba(107, 164, 255, 0.05); }
+        .bt-sheet-scroll { max-height: 640px; overflow: auto; background: #ffffff; }
+        .bt-sheet-table { border-collapse: collapse; font-size: 12px; font-family: 'Calibri', 'Segoe UI', Arial, sans-serif; color: #000000; background: #ffffff; }
+        .bt-sheet-table td { padding: 3px 6px; border: 1px solid #d4d4d4; white-space: nowrap; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
 
         /* Approve button on chat entries (Billing Test tab only) */
         .update-approve-btn { background: rgba(255, 100, 140, 0.15); color: #ff6b8f; border: 1px solid rgba(255, 100, 140, 0.5); padding: 6px 14px; border-radius: 5px; font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; cursor: pointer; margin-left: 6px; transition: all 0.15s ease; }
@@ -1866,7 +1890,9 @@ export default function Dashboard() {
         .approval-error { margin-top: 10px; color: #ff8888; font-size: 12px; }
         .approval-modal-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 26px; border-top: 1px solid rgba(255, 255, 255, 0.08); }
         .approval-submit-btn { background: rgba(255, 100, 140, 0.2); color: #ff6b8f; border: 1px solid rgba(255, 100, 140, 0.6); padding: 8px 22px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 700; cursor: pointer; transition: all 0.15s ease; }
-        .approval-submit-btn:hover { background: rgba(255, 100, 140, 0.35); border-color: rgba(255, 100, 140, 0.85); }
+        .approval-submit-btn:hover:not(:disabled) { background: rgba(255, 100, 140, 0.35); border-color: rgba(255, 100, 140, 0.85); }
+        .approval-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .approval-passcode-input:disabled { opacity: 0.5; cursor: not-allowed; }
         .upload-modal-footer { padding: 16px 26px; border-top: 1px solid rgba(255, 255, 255, 0.08); display: flex; justify-content: flex-end; }
 
         .master-table-wrapper { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: auto; max-height: 65vh; backdrop-filter: blur(20px); }
@@ -3548,55 +3574,71 @@ export default function Dashboard() {
               <>
                 <div className="billing-header-row">
                   <div className="billing-title-block">
-                    <h2>Billing Test - Raw File Viewer</h2>
+                    <h2>Billing Test</h2>
                     <div className="billing-subtitle">
-                      Displaying: {billingTestReport.sourceFile ? billingTestReport.sourceFile.split('/').pop() : 'no file loaded'}
-                      {billingTestApprovedKey && (
-                        <> · <span style={{ color: '#80d090', fontWeight: 600 }}>APPROVED FILE FROM CHAT</span></>
+                      Displaying: {billingTestReport.filename || (billingTestReport.sourceFile ? billingTestReport.sourceFile.split('/').pop() : 'no file loaded')}
+                      {billingTestReport.approvedKey && (
+                        <> · <span style={{ color: '#80d090', fontWeight: 600 }}>APPROVED FILE</span></>
                       )}
                     </div>
                   </div>
-                  {billingTestApprovedKey && (
-                    <button className="billing-refresh-btn" onClick={resetToDefaultBillingTest}>
-                      Reset to Default File
-                    </button>
-                  )}
                 </div>
 
                 {billingTestReport.sheets.length === 0 ? (
                   <div className="empty-state" style={{ padding: 32 }}>{billingTestReport.message || 'No sheets in this file.'}</div>
                 ) : (
                   <div className="bt-sheet-viewer">
-                    {/* Sheet tabs */}
                     <div className="bt-sheet-tabs">
                       {billingTestReport.sheets.map(s => (
                         <button
                           key={s.name}
                           className={`bt-sheet-tab ${billingTestActiveSheet === s.name ? 'active' : ''}`}
                           onClick={() => setBillingTestActiveSheet(s.name)}
-                          title={s.title || undefined}
                         >
                           {s.name}
                         </button>
                       ))}
                     </div>
-                    {/* Active sheet content */}
                     {(() => {
                       const active = billingTestReport.sheets.find(s => s.name === billingTestActiveSheet)
                         || billingTestReport.sheets[0];
                       if (!active) return null;
                       const cells = active.cells;
+                      const columnWidths = active.columnWidths || [];
                       const maxCols = cells.reduce((m, r) => Math.max(m, r.length), 0);
                       return (
                         <div className="bt-sheet-scroll">
-                          <table className="bt-sheet-table">
+                          <table className="bt-sheet-table" style={{ tableLayout: 'fixed' }}>
+                            <colgroup>
+                              {Array.from({ length: maxCols }).map((_, i) => (
+                                <col key={i} style={{ width: `${columnWidths[i] || 96}px` }} />
+                              ))}
+                            </colgroup>
                             <tbody>
                               {cells.map((row, ri) => (
                                 <tr key={ri}>
-                                  {Array.from({ length: maxCols }).map((_, ci) => {
-                                    const v = row[ci];
-                                    const display = v === null || v === undefined ? '' : String(v);
-                                    return <td key={ci}>{display}</td>;
+                                  {row.map((cell, ci) => {
+                                    if (cell.hidden) return null; // slave cell in a merge - master handles spans
+                                    const style: React.CSSProperties = {};
+                                    if (cell.bg) style.backgroundColor = cell.bg;
+                                    if (cell.fg) style.color = cell.fg;
+                                    if (cell.b) style.fontWeight = 700;
+                                    if (cell.i) style.fontStyle = 'italic';
+                                    if (cell.a) style.textAlign = cell.a;
+                                    if (cell.bl) style.borderLeft = cell.bl;
+                                    if (cell.br) style.borderRight = cell.br;
+                                    if (cell.bt) style.borderTop = cell.bt;
+                                    if (cell.bb) style.borderBottom = cell.bb;
+                                    return (
+                                      <td
+                                        key={ci}
+                                        style={style}
+                                        rowSpan={cell.rs}
+                                        colSpan={cell.cs}
+                                      >
+                                        {cell.v}
+                                      </td>
+                                    );
                                   })}
                                 </tr>
                               ))}
@@ -3755,15 +3797,18 @@ export default function Dashboard() {
                 className="approval-passcode-input"
                 value={approvalPasscode}
                 onChange={e => { setApprovalPasscode(e.target.value); setApprovalError(null); }}
-                onKeyDown={e => { if (e.key === 'Enter') submitApproval(); }}
+                onKeyDown={e => { if (e.key === 'Enter' && !approvalSubmitting) submitApproval(); }}
                 autoFocus
                 placeholder="Enter passcode..."
+                disabled={approvalSubmitting}
               />
               {approvalError && <div className="approval-error">{approvalError}</div>}
             </div>
             <div className="approval-modal-footer">
-              <button className="close-btn" onClick={closeApprovalModal}>Cancel</button>
-              <button className="approval-submit-btn" onClick={submitApproval}>Approve</button>
+              <button className="close-btn" onClick={closeApprovalModal} disabled={approvalSubmitting}>Cancel</button>
+              <button className="approval-submit-btn" onClick={submitApproval} disabled={approvalSubmitting}>
+                {approvalSubmitting ? 'Approving...' : 'Approve'}
+              </button>
             </div>
           </div>
         </>
