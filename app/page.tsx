@@ -154,6 +154,54 @@ function detectMonthYear(filename: string): { year: number; month: number } | nu
   return null;
 }
 
+// Same strict classification logic as the backend. Returns 'unknown' if none of
+// the canonical rules match. Duplicated here so the upload modal can filter the
+// All Info files client-side (avoiding an extra S3 round-trip on modal open).
+function classifyFile(filename: string): string {
+  const lower = filename.toLowerCase();
+  const hasRemittance = lower.includes('remittance');
+  const hasCredits = lower.includes('credits');
+
+  if (lower.includes('corechoice')) {
+    if (lower.includes('t1')) return 'Corechoice T1';
+    if (lower.includes('t3')) return 'Corechoice T3';
+  }
+  if (lower.includes('delta') && lower.includes('dental')) return 'Delta Dental';
+  if (lower.includes('nyp') || lower.includes('ny-practice') || lower.includes('ny practice')) return 'NYP Remittance';
+  if (lower.includes('enroll confidently') || lower.includes('piopac')) return 'Enroll Confidently or PIOPAC';
+
+  if (lower.includes('cassena')) {
+    if (hasCredits) return 'Cassena Credits';
+    if (hasRemittance) return 'Cassena Remittance';
+  }
+  if (lower.includes('bdsb')) {
+    if (hasCredits) return 'BDSB Credits';
+    if (hasRemittance) return 'BDSB Remittance';
+  }
+  if (lower.includes('gwu3')) {
+    if (hasCredits) return 'GWU3 Credits';
+    if (hasRemittance) return 'GWU3 Remittance';
+  }
+  if (lower.includes('northstead')) {
+    if (hasCredits) return 'Northstead Credits';
+    if (hasRemittance) return 'Northstead Remittance';
+  }
+  if (lower.includes('ep6')) return 'EP6 Remittance';
+  if (/\bgig\b/i.test(filename) || lower.includes('_gig_') || lower.startsWith('gig')) {
+    if (hasCredits) return 'Gig Credits';
+    if (hasRemittance) return 'Gig Remittance';
+  }
+  if (lower.includes('refresh')) return 'Refresh';
+  return 'unknown';
+}
+
+// Files with these extensions are shown in All Info but excluded from Master
+// Dashboard analysis (they show an "EXCLUDED" tag next to their size).
+function isExcludedByExtension(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  return lower.endsWith('.pdf') || lower.endsWith('.zip');
+}
+
 function monthKey(year: number, month: number): string {
   return `${year}-${String(month).padStart(2, '0')}`;
 }
@@ -247,7 +295,9 @@ function highlight(text: string, terms: string[]): React.ReactNode {
 
 export default function Dashboard() {
   const [mounted, setMounted] = useState(false);
+  // All Info state (list of files)
   const [grouped, setGrouped] = useState<DoubleGrouped>({});
+  const [allFilesRaw, setAllFilesRaw] = useState<FileRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [totalFiles, setTotalFiles] = useState(0);
@@ -294,8 +344,6 @@ export default function Dashboard() {
   ];
   type UploadRowStatus =
     | { kind: 'idle' }
-    | { kind: 'checking' }
-    | { kind: 'exists'; existingFiles: { key: string; size: number; lastModified: string | null; filename: string }[] }
     | { kind: 'uploading' }
     | { kind: 'success'; renamedTo: string; overridden: boolean }
     | { kind: 'error'; message: string };
@@ -404,6 +452,7 @@ export default function Dashboard() {
       })
       .then((data: FileRow[]) => {
         setGrouped(groupFiles(data));
+        setAllFilesRaw(data);
         setTotalFiles(data.length);
         setLoading(false);
       })
@@ -1193,7 +1242,7 @@ export default function Dashboard() {
     const i = name.lastIndexOf('.');
     return i >= 0 ? name.slice(i).toLowerCase() : '.xlsx';
   }
-  async function doUpload(label: string, override: boolean, overrideKey?: string) {
+  async function doUpload(label: string, overrideKey?: string) {
     const file = uploadRowFiles[label];
     if (!file) return;
     setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'uploading' } }));
@@ -1203,7 +1252,11 @@ export default function Dashboard() {
       fd.append('canonicalLabel', label);
       fd.append('month', String(uploadMonth));
       fd.append('year', String(uploadYear));
-      fd.append('override', override ? 'true' : 'false');
+      // Always send override=true - the frontend has already shown the existing
+      // files (client-side check), so a 409 from the backend would be redundant.
+      // When overrideKey is provided, the backend deletes that specific file after
+      // upload. When it's omitted, the new file is added without deleting anything.
+      fd.append('override', 'true');
       if (overrideKey) fd.append('overrideKey', overrideKey);
       const res = await fetch('/api/master/upload', { method: 'POST', body: fd });
       const body = await res.json();
@@ -1211,51 +1264,39 @@ export default function Dashboard() {
         setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'error', message: body.error || 'Upload failed' } }));
         return;
       }
-      setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'success', renamedTo: body.renamedTo, overridden: !!body.overridden } }));
-    } catch (err: any) {
-      setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'error', message: err.message || 'Network error' } }));
-    }
-  }
-  async function handleRowUpload(label: string) {
-    const file = uploadRowFiles[label];
-    if (!file) return;
-    setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'checking' } }));
-    try {
-      const res = await fetch('/api/master/upload-check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          canonicalLabel: label,
-          month: uploadMonth,
-          year: uploadYear,
-          ext: extractExt(file.name),
-        }),
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'error', message: body.error || 'Check failed' } }));
-        return;
-      }
-      if (body.exists && Array.isArray(body.existingFiles) && body.existingFiles.length > 0) {
-        setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'exists', existingFiles: body.existingFiles } }));
-        return;
-      }
-      // No existing files - upload straight away
-      await doUpload(label, false);
+      setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'success', renamedTo: body.renamedTo, overridden: !!overrideKey } }));
     } catch (err: any) {
       setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'error', message: err.message || 'Network error' } }));
     }
   }
   function handleRowOverrideOne(label: string, overrideKey: string) {
-    doUpload(label, true, overrideKey);
+    doUpload(label, overrideKey);
   }
-  function handleRowCancelOverride(label: string) {
-    setUploadRowStatus(prev => ({ ...prev, [label]: { kind: 'idle' } }));
+  function handleRowAddNew(label: string) {
+    doUpload(label, undefined);
   }
   function formatBytes(n: number): string {
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
     return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+  // Client-side lookup of existing files that match a canonical label + month + year.
+  // Uses the already-loaded All Info data instead of hitting S3, so the upload
+  // modal can show existing files immediately when it opens.
+  function existingFilesForRow(label: string): FileRow[] {
+    if (!allFilesRaw || allFilesRaw.length === 0) return [];
+    const matches: FileRow[] = [];
+    for (const f of allFilesRaw) {
+      // Skip files that aren't part of the analysis pipeline
+      if (isExcludedByExtension(f.filename)) continue;
+      const detected = detectMonthYear(f.filename);
+      if (!detected) continue;
+      if (detected.month !== uploadMonth || detected.year !== uploadYear) continue;
+      if (classifyFile(f.filename) !== label) continue;
+      matches.push(f);
+    }
+    matches.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
+    return matches;
   }
 
   return (
@@ -1600,7 +1641,8 @@ export default function Dashboard() {
         .file-picker-name { display: inline-block; margin-left: 10px; font-size: 11px; color: rgba(255, 255, 255, 0.85); font-family: 'JetBrains Mono', 'Courier New', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; vertical-align: middle; }
         .upload-col-action { width: 45%; }
         .upload-row-btn { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.4); padding: 5px 14px; border-radius: 4px; font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; margin-right: 6px; }
-        .upload-row-btn:hover { background: rgba(107, 164, 255, 0.25); }
+        .upload-row-btn:hover:not(:disabled) { background: rgba(107, 164, 255, 0.25); }
+        .upload-row-btn:disabled { opacity: 0.4; cursor: not-allowed; }
         .upload-override-btn { background: rgba(255, 165, 0, 0.15); color: #ffb055; border-color: rgba(255, 165, 0, 0.4); }
         .upload-override-btn:hover { background: rgba(255, 165, 0, 0.25); }
         .upload-cancel-btn { background: rgba(255, 100, 100, 0.1); color: #ff8888; border-color: rgba(255, 100, 100, 0.35); }
@@ -1617,6 +1659,10 @@ export default function Dashboard() {
         .upload-existing-link { color: #6ba4ff; text-decoration: underline; font-size: 12px; font-family: 'JetBrains Mono', 'Courier New', monospace; word-break: break-all; }
         .upload-existing-link:hover { color: #90c0ff; }
         .upload-exists-actions { display: flex; gap: 6px; margin-top: 4px; }
+        .upload-add-new-row { margin-top: 6px; }
+        .upload-addnew-btn { background: rgba(80, 200, 120, 0.15); color: #80d090; border: 1px solid rgba(80, 200, 120, 0.4); }
+        .upload-addnew-btn:hover { background: rgba(80, 200, 120, 0.25); border-color: rgba(80, 200, 120, 0.7); }
+        .upload-notice { padding: 12px 16px; margin-bottom: 14px; background: rgba(80, 200, 120, 0.08); border: 1px solid rgba(80, 200, 120, 0.3); border-left: 3px solid rgba(80, 200, 120, 0.7); border-radius: 6px; font-size: 12px; color: rgba(200, 240, 210, 0.95); }
         .upload-modal-footer { padding: 16px 26px; border-top: 1px solid rgba(255, 255, 255, 0.08); display: flex; justify-content: flex-end; }
 
         .master-table-wrapper { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: auto; max-height: 65vh; backdrop-filter: blur(20px); }
@@ -1723,6 +1769,7 @@ export default function Dashboard() {
         .file-item-name { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 13px; color: #ffffff; flex: 1; word-break: break-all; }
         .file-item-actions { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
         .file-item-meta { font-size: 12px; color: rgba(255, 255, 255, 0.4); white-space: nowrap; }
+        .file-item-excluded { font-size: 10px; letter-spacing: 0.15em; font-weight: 700; color: #ff8888; background: rgba(255, 136, 136, 0.1); border: 1px solid rgba(255, 136, 136, 0.3); padding: 2px 8px; border-radius: 3px; text-transform: uppercase; white-space: nowrap; }
         .download-btn { display: flex; align-items: center; gap: 6px; padding: 6px 14px; background: rgba(107, 164, 255, 0.12); border: 1px solid rgba(107, 164, 255, 0.25); border-radius: 8px; color: #6ba4ff; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
         .download-btn:hover { background: rgba(107, 164, 255, 0.22); border-color: rgba(107, 164, 255, 0.5); color: #ffffff; }
         .download-btn:active { transform: scale(0.96); }
@@ -1969,6 +2016,9 @@ export default function Dashboard() {
                                 >
                                   <span className="file-item-name">{file.filename}</span>
                                   <div className="file-item-actions">
+                                    {isExcludedByExtension(file.filename) && (
+                                      <span className="file-item-excluded" title="Excluded from Master Dashboard analysis">EXCLUDED</span>
+                                    )}
                                     <span className="file-item-meta">{formatBytes(file.size)} · {formatDate(file.lastModified)}</span>
                                     <button
                                       className="download-btn"
@@ -3327,6 +3377,11 @@ export default function Dashboard() {
             </div>
 
             <div className="upload-modal-body">
+              {Object.values(uploadRowStatus).some(s => s && s.kind === 'success') && (
+                <div className="upload-notice">
+                  Upload complete. Please switch to the <strong>All Info</strong> tab and verify the uploaded file(s) appear in the correct month. If any file is missing, refresh the page.
+                </div>
+              )}
               <table className="upload-table">
                 <thead>
                   <tr>
@@ -3339,6 +3394,8 @@ export default function Dashboard() {
                   {CANONICAL_FILES.map(label => {
                     const file = uploadRowFiles[label] || null;
                     const status: UploadRowStatus = uploadRowStatus[label] || { kind: 'idle' };
+                    const existingFiles = existingFilesForRow(label);
+                    const isBusy = status.kind === 'uploading';
                     return (
                       <tr key={label}>
                         <td className="upload-col-name">{label}</td>
@@ -3349,34 +3406,21 @@ export default function Dashboard() {
                               type="file"
                               accept=".xlsx,.xls,.csv"
                               onChange={e => handleRowFileChange(label, e.target.files?.[0] || null)}
-                              disabled={status.kind === 'checking' || status.kind === 'uploading'}
+                              disabled={isBusy}
                               style={{ display: 'none' }}
                             />
                           </label>
                           {file && <span className="file-picker-name" title={file.name}>{file.name}</span>}
                         </td>
                         <td className="upload-col-action">
-                          {!file && status.kind === 'idle' && (
-                            <span className="upload-status-muted">-</span>
-                          )}
-                          {file && status.kind === 'idle' && (
-                            <button className="upload-row-btn" onClick={() => handleRowUpload(label)}>
-                              Upload
-                            </button>
-                          )}
-                          {status.kind === 'checking' && (
-                            <span className="upload-status-progress">Checking...</span>
-                          )}
-                          {status.kind === 'uploading' && (
-                            <span className="upload-status-progress">Uploading...</span>
-                          )}
-                          {status.kind === 'exists' && (
+                          {/* Existing matches shown inline, always visible when present */}
+                          {existingFiles.length > 0 && status.kind !== 'success' && (
                             <div className="upload-exists-prompt">
                               <div className="upload-exists-msg">
-                                {status.existingFiles.length} matching file{status.existingFiles.length === 1 ? '' : 's'} found for {MONTH_NAMES[uploadMonth]} {uploadYear}. Pick one to override:
+                                {existingFiles.length} existing file{existingFiles.length === 1 ? '' : 's'} for {MONTH_NAMES[uploadMonth]} {uploadYear}:
                               </div>
                               <ul className="upload-existing-list">
-                                {status.existingFiles.map(f => (
+                                {existingFiles.map(f => (
                                   <li key={f.key} className="upload-existing-row">
                                     <a
                                       href={`/api/master/download-existing?key=${encodeURIComponent(f.key)}`}
@@ -3390,18 +3434,29 @@ export default function Dashboard() {
                                     <button
                                       className="upload-row-btn upload-override-btn"
                                       onClick={() => handleRowOverrideOne(label, f.key)}
+                                      disabled={!file || isBusy}
+                                      title={!file ? 'Select a file first' : 'Replace this file with your new upload'}
                                     >
                                       Override this
                                     </button>
                                   </li>
                                 ))}
                               </ul>
-                              <div className="upload-exists-actions">
-                                <button className="upload-row-btn upload-cancel-btn" onClick={() => handleRowCancelOverride(label)}>
-                                  Cancel
-                                </button>
-                              </div>
                             </div>
+                          )}
+                          {/* Add-new button - shows once a file has been picked, regardless of existing matches */}
+                          {file && status.kind === 'idle' && (
+                            <div className="upload-add-new-row">
+                              <button className="upload-row-btn upload-addnew-btn" onClick={() => handleRowAddNew(label)}>
+                                {existingFiles.length > 0 ? 'Add new (do not override)' : 'Upload'}
+                              </button>
+                            </div>
+                          )}
+                          {!file && existingFiles.length === 0 && status.kind === 'idle' && (
+                            <span className="upload-status-muted">-</span>
+                          )}
+                          {status.kind === 'uploading' && (
+                            <span className="upload-status-progress">Uploading...</span>
                           )}
                           {status.kind === 'success' && (
                             <span className="upload-status-success">

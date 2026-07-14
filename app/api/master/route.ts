@@ -562,13 +562,18 @@ export async function GET() {
       : [];
 
     // Terminated: for each consecutive pair (older, newer), members in older NOT in newer.
+    // BUT: if the person's file was missing entirely from the newer month, we can't tell
+    // whether they actually terminated - the whole group's data is just absent. Skip them.
     // Termination date = last day of older month.
     const terminatedMembers: MasterTerminatedRow[] = [];
     for (let i = 0; i < monthData.length - 1; i++) {
       const older = monthData[i];
       const newer = monthData[i + 1];
+      const newerLabels = labelsByMonth.get(newer.mk) || new Set<string>();
       for (const [id, record] of older.identityMap) {
         if (!newer.identityMap.has(id)) {
+          // Skip if this person's file wasn't uploaded to the newer month at all
+          if (!newerLabels.has(record.file)) continue;
           terminatedMembers.push({
             ...record,
             terminationDate: lastDayOfMonth(older.year, older.month),
@@ -578,13 +583,18 @@ export async function GET() {
     }
 
     // New: for each consecutive pair (older, newer), members in newer NOT in older.
-    // Effective date = first day of newer month. Skip the oldest month entirely (baseline, not "new").
+    // BUT: if the person's file was missing entirely from the older month, we can't tell
+    // whether they're actually new - the whole group's data was just absent. Skip them.
+    // Effective date = first day of newer month. Skip the oldest month entirely (baseline).
     const newMembers: MasterNewRow[] = [];
     for (let i = 1; i < monthData.length; i++) {
       const older = monthData[i - 1];
       const newer = monthData[i];
+      const olderLabels = labelsByMonth.get(older.mk) || new Set<string>();
       for (const [id, record] of newer.identityMap) {
         if (!older.identityMap.has(id)) {
+          // Skip if this person's file wasn't in the older month at all
+          if (!olderLabels.has(record.file)) continue;
           newMembers.push({
             ...record,
             effectiveDate: firstDayOfMonth(newer.year, newer.month),

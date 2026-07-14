@@ -1,8 +1,15 @@
 // Next.js App Router API route
 // Located at: app/api/files/route.ts
 //
-// Returns a JSON array of all files in the raw S3 bucket.
+// Returns a JSON array of all files under carrier=*/ in the raw S3 bucket.
 // Reads AWS credentials from environment variables.
+//
+// Includes:
+//   - Data files (.xlsx / .xls / .csv) used by Master Dashboard
+//   - Excluded types (.pdf / .zip) - shown in All Info with an EXCLUDED tag,
+//     but skipped by Master Dashboard analysis.
+// Skips everything outside carrier=*/ (billing-sources/, billing-reports/,
+// billing-updates/, etc.) so reconciliation output never shows up as "unknown".
 
 import { NextResponse } from 'next/server';
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
@@ -17,6 +24,8 @@ const s3 = new S3Client({
     secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY!,
   },
 });
+
+const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.csv', '.pdf', '.zip'];
 
 console.log('REGION:', process.env.MY_AWS_REGION);
 console.log('KEY_ID present:', !!process.env.MY_AWS_ACCESS_KEY_ID);
@@ -40,6 +49,9 @@ export async function GET() {
     do {
       const cmd: ListObjectsV2Command = new ListObjectsV2Command({
         Bucket: BUCKET,
+        // Only scan carrier folders. Billing sources/reports/updates live under
+        // different prefixes and should not appear in the All Info tab.
+        Prefix: 'carrier=',
         ContinuationToken: continuationToken,
       });
       const res = await s3.send(cmd);
@@ -48,6 +60,9 @@ export async function GET() {
         if (!obj.Key) continue;
         // Skip folder markers (keys ending with /)
         if (obj.Key.endsWith('/')) continue;
+
+        const lower = obj.Key.toLowerCase();
+        if (!ALLOWED_EXTENSIONS.some((ext) => lower.endsWith(ext))) continue;
 
         const parts = obj.Key.split('/');
         const filename = parts[parts.length - 1];
