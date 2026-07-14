@@ -79,6 +79,8 @@ type MemberRecord = {
 type ActiveRow = MemberRecord;
 type TerminatedRow = MemberRecord & { terminationDate: string };
 type NewRow = MemberRecord & { effectiveDate: string };
+type FileTimelineEntry = { month: string; present: boolean };
+type FileTimeline = { file: string; lastUpdatedMonth: string | null; history: FileTimelineEntry[] };
 type MasterData = {
   monthsProcessed: string[];
   activeMembers: ActiveRow[];
@@ -88,6 +90,7 @@ type MasterData = {
   previousMonthLabel: string | null;
   latestMonthMissingFiles: string[];
   previousMonthMissingFiles: string[];
+  fileTimelines: FileTimeline[];
 };
 
 const MONTH_NAMES = [
@@ -1555,6 +1558,22 @@ export default function Dashboard() {
         .master-missing-list { color: rgba(255, 235, 210, 0.85); }
         .master-missing-files-none { background: rgba(80, 200, 120, 0.05); border-color: rgba(80, 200, 120, 0.25); border-left-color: rgba(80, 200, 120, 0.7); color: rgba(180, 240, 200, 0.9); font-style: italic; font-size: 12px; }
 
+        /* File timelines (Terminated + New Members tables) */
+        .file-timelines { display: flex; flex-direction: column; gap: 10px; margin: 0 0 16px; padding: 14px 18px; background: rgba(255, 165, 0, 0.06); border: 1px solid rgba(255, 165, 0, 0.25); border-left: 3px solid rgba(255, 165, 0, 0.7); border-radius: 8px; }
+        .file-timelines-heading { font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; color: rgba(255, 180, 100, 0.95); margin-bottom: 4px; }
+        .file-timeline-row { display: flex; flex-direction: column; gap: 3px; padding: 8px 0; border-bottom: 1px dotted rgba(255, 255, 255, 0.06); }
+        .file-timeline-row:last-child { border-bottom: none; padding-bottom: 0; }
+        .file-timeline-row:first-of-type { padding-top: 0; }
+        .file-timeline-header { font-size: 13px; color: rgba(255, 235, 210, 0.95); }
+        .file-timeline-name { font-weight: 600; color: rgba(255, 255, 255, 0.95); }
+        .file-timeline-last-label { color: rgba(255, 255, 255, 0.55); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+        .file-timeline-last { color: rgba(255, 220, 130, 1); font-weight: 600; }
+        .file-timeline-history { font-size: 11px; color: rgba(255, 255, 255, 0.6); font-family: 'JetBrains Mono', 'Courier New', monospace; margin-left: 4px; }
+        .file-timeline-entry { margin-right: 14px; white-space: nowrap; }
+        .file-timeline-month { color: rgba(255, 255, 255, 0.6); }
+        .file-timeline-check { color: #80d090; font-weight: 700; }
+        .file-timeline-missing { color: #ff8888; font-style: italic; }
+
         /* Upload Files button lives in the All Info search bar */
         .upload-files-wrap { display: inline-flex; flex-direction: column; align-items: center; gap: 4px; margin-left: 8px; }
         .upload-files-btn { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.4); padding: 8px 18px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; }
@@ -2067,7 +2086,7 @@ export default function Dashboard() {
                         </div>
                       ) : (
                         <div className="master-missing-files master-missing-files-none">
-                          All 16 files present for {masterData.latestMonthLabel}.
+                          All {masterData.fileTimelines.length} files present for {masterData.latestMonthLabel}.
                         </div>
                       )
                     )}
@@ -2112,15 +2131,39 @@ export default function Dashboard() {
                       Terminated Members
                       <span className="master-section-count">{fullyFilter(masterData.terminatedMembers, true, false).length} of {masterData.terminatedMembers.length}</span>
                     </h2>
-                    {masterData.previousMonthLabel && (
-                      masterData.previousMonthMissingFiles.length > 0 ? (
-                        <div className="master-missing-files">
-                          <span className="master-missing-label">Missing files for {masterData.previousMonthLabel}:</span>
-                          <span className="master-missing-list">{masterData.previousMonthMissingFiles.join(', ')}</span>
+                    {masterData.latestMonthLabel && (
+                      masterData.latestMonthMissingFiles.length > 0 ? (
+                        <div className="file-timelines">
+                          <div className="file-timelines-heading">
+                            Files missing in {masterData.latestMonthLabel}:
+                          </div>
+                          {masterData.fileTimelines
+                            .filter(t => masterData.latestMonthMissingFiles.includes(t.file))
+                            .map(t => (
+                              <div key={t.file} className="file-timeline-row">
+                                <div className="file-timeline-header">
+                                  <span className="file-timeline-name">{t.file}:</span>{' '}
+                                  <span className="file-timeline-last-label">Last Updated Month:</span>{' '}
+                                  <span className="file-timeline-last">{t.lastUpdatedMonth || 'Never uploaded'}</span>
+                                </div>
+                                <div className="file-timeline-history">
+                                  {t.history.map((entry, i) => (
+                                    <span key={i} className="file-timeline-entry">
+                                      <span className="file-timeline-month">{entry.month}</span>{' '}
+                                      {entry.present ? (
+                                        <span className="file-timeline-check">✓</span>
+                                      ) : (
+                                        <span className="file-timeline-missing">(Missing)</span>
+                                      )}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
                         </div>
                       ) : (
                         <div className="master-missing-files master-missing-files-none">
-                          All 16 files present for {masterData.previousMonthLabel}.
+                          All {masterData.fileTimelines.length} files present for {masterData.latestMonthLabel}.
                         </div>
                       )
                     )}
@@ -2165,15 +2208,39 @@ export default function Dashboard() {
                       New Members
                       <span className="master-section-count">{fullyFilter(masterData.newMembers, false, true).length} of {masterData.newMembers.length}</span>
                     </h2>
-                    {masterData.previousMonthLabel && (
-                      masterData.previousMonthMissingFiles.length > 0 ? (
-                        <div className="master-missing-files">
-                          <span className="master-missing-label">Missing files for {masterData.previousMonthLabel}:</span>
-                          <span className="master-missing-list">{masterData.previousMonthMissingFiles.join(', ')}</span>
+                    {masterData.latestMonthLabel && (
+                      masterData.latestMonthMissingFiles.length > 0 ? (
+                        <div className="file-timelines">
+                          <div className="file-timelines-heading">
+                            Files missing in {masterData.latestMonthLabel}:
+                          </div>
+                          {masterData.fileTimelines
+                            .filter(t => masterData.latestMonthMissingFiles.includes(t.file))
+                            .map(t => (
+                              <div key={t.file} className="file-timeline-row">
+                                <div className="file-timeline-header">
+                                  <span className="file-timeline-name">{t.file}:</span>{' '}
+                                  <span className="file-timeline-last-label">Last Updated Month:</span>{' '}
+                                  <span className="file-timeline-last">{t.lastUpdatedMonth || 'Never uploaded'}</span>
+                                </div>
+                                <div className="file-timeline-history">
+                                  {t.history.map((entry, i) => (
+                                    <span key={i} className="file-timeline-entry">
+                                      <span className="file-timeline-month">{entry.month}</span>{' '}
+                                      {entry.present ? (
+                                        <span className="file-timeline-check">✓</span>
+                                      ) : (
+                                        <span className="file-timeline-missing">(Missing)</span>
+                                      )}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
                         </div>
                       ) : (
                         <div className="master-missing-files master-missing-files-none">
-                          All 16 files present for {masterData.previousMonthLabel}.
+                          All {masterData.fileTimelines.length} files present for {masterData.latestMonthLabel}.
                         </div>
                       )
                     )}

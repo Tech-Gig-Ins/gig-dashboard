@@ -606,6 +606,24 @@ export async function GET() {
       ? CANONICAL_FILES.filter(f => !previousLabels.has(f))
       : [];
 
+    // Per-file timeline across all processed months. Consumed by the Terminated
+    // and New Members tables to show, for each currently-missing file, which
+    // months it was present or missing in.
+    type FileTimelineEntry = { month: string; present: boolean };
+    type FileTimeline = { file: string; lastUpdatedMonth: string | null; history: FileTimelineEntry[] };
+    const fileTimelines: FileTimeline[] = CANONICAL_FILES.map(f => {
+      const history: FileTimelineEntry[] = monthData.map(m => ({
+        month: m.label,
+        present: (labelsByMonth.get(m.mk) || new Set<string>()).has(f),
+      }));
+      // Walk history from newest to oldest to find the last month the file was present
+      let lastUpdatedMonth: string | null = null;
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].present) { lastUpdatedMonth = history[i].month; break; }
+      }
+      return { file: f, lastUpdatedMonth, history };
+    });
+
     return NextResponse.json({
       monthsProcessed: sortedMonths.map(mk => {
         const [yStr, mStr] = mk.split('-');
@@ -621,6 +639,7 @@ export async function GET() {
       previousMonthLabel: previousMonth?.label || null,
       latestMonthMissingFiles,
       previousMonthMissingFiles,
+      fileTimelines,
     });
   } catch (err: any) {
     console.error('Master dashboard error:', err);
