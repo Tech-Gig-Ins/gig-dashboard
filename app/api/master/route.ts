@@ -78,6 +78,15 @@ function detectMonthYearForFilter(filename: string): { year: number; month: numb
     const month = parseInt(m4[2], 10) - 1;
     if (year >= 2020 && year <= 2099 && month >= 0 && month <= 11) return { year, month };
   }
+  // YYYY-MM or YYYY_MM without a day (e.g. "2026-07 PIOPAC.xls").
+  // Lookahead prevents matching part of a full YYYY-MM-DD or a longer digit run.
+  const yearMonthPattern = /(\d{4})[\-_](\d{1,2})(?![\d]|[\-_\/]\d)/;
+  const m5 = filename.match(yearMonthPattern);
+  if (m5) {
+    const year = parseInt(m5[1], 10);
+    const month = parseInt(m5[2], 10) - 1;
+    if (year >= 2020 && year <= 2099 && month >= 0 && month <= 11) return { year, month };
+  }
 
   return null;
 }

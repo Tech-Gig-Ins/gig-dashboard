@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { CONSULTANT_ROWS, UNIQUE_CONSULTANTS, REPORT_MONTH, type ConsultantRow } from './data/consultantData';
 import * as XLSX from 'xlsx';
 
@@ -151,6 +151,16 @@ function detectMonthYear(filename: string): { year: number; month: number } | nu
     const month = parseInt(m4[2], 10) - 1;
     if (year >= 2020 && year <= 2099 && month >= 0 && month <= 11) return { year, month };
   }
+  // YYYY-MM or YYYY_MM without a day (e.g. "2026-07 PIOPAC.xls").
+  // Negative lookahead prevents this from swallowing full YYYY-MM-DD dates
+  // (which are already handled above) or picking up part of a longer number.
+  const yearMonthPattern = /(\d{4})[\-_](\d{1,2})(?![\d]|[\-_\/]\d)/;
+  const m5 = filename.match(yearMonthPattern);
+  if (m5) {
+    const year = parseInt(m5[1], 10);
+    const month = parseInt(m5[2], 10) - 1;
+    if (year >= 2020 && year <= 2099 && month >= 0 && month <= 11) return { year, month };
+  }
   return null;
 }
 
@@ -243,6 +253,53 @@ type DoubleGrouped = {
     systems: { [systemName: string]: FileRow[] };
   };
 };
+
+// System-first grouping used by the All Info browse view (Source -> Month -> Files).
+type SystemGrouped = {
+  [systemName: string]: {
+    displayName: string;
+    totalFiles: number;
+    months: {
+      [monthKey: string]: {
+        label: string;
+        year: number;
+        month: number;
+        files: FileRow[];
+      };
+    };
+  };
+};
+
+function groupFilesBySystem(files: FileRow[]): SystemGrouped {
+  const result: SystemGrouped = {};
+  for (const file of files) {
+    const sysMatch = file.key.match(/^carrier=([^/]+)\//);
+    const system = sysMatch ? sysMatch[1] : 'unknown';
+    const detected = detectMonthYear(file.filename);
+    let year: number, month: number, label: string, mKey: string;
+    if (detected) {
+      year = detected.year;
+      month = detected.month;
+      label = monthLabel(year, month);
+      mKey = monthKey(year, month);
+    } else {
+      const d = new Date(file.lastModified);
+      year = d.getFullYear();
+      month = d.getMonth();
+      label = `${monthLabel(year, month)} (from upload date)`;
+      mKey = `unknown-${monthKey(year, month)}`;
+    }
+    if (!result[system]) {
+      result[system] = { displayName: prettifySystemName(system), totalFiles: 0, months: {} };
+    }
+    if (!result[system].months[mKey]) {
+      result[system].months[mKey] = { label, year, month, files: [] };
+    }
+    result[system].months[mKey].files.push(file);
+    result[system].totalFiles++;
+  }
+  return result;
+}
 
 function groupFiles(files: FileRow[]): DoubleGrouped {
   const result: DoubleGrouped = {};
@@ -1029,23 +1086,42 @@ export default function Dashboard() {
     }
   }
 
-  const sortedMonthKeys = Object.keys(grouped)
-    .filter((k) => {
-      if (k.startsWith('unknown-')) return false;
-      const [yearStr, monthStr] = k.split('-');
-      const year = parseInt(yearStr, 10);
-      const month = parseInt(monthStr, 10);
-      if (year > 2026) return true;
-      if (year === 2026 && month >= 4) return true;
-      return false;
-    })
-    .sort((a, b) => {
+  // System-first grouping for the All Info browse view. Recomputes only when
+  // the flat file list changes.
+  const systemGrouped = useMemo(() => groupFilesBySystem(allFilesRaw), [allFilesRaw]);
+
+  // Order sources by canonical carrier priority so the layout is predictable
+  // regardless of upload order. Unknown carriers fall to the end alphabetically.
+  const SYSTEM_ORDER = ['refresh', 'northstead', 'gig', 'tpa', 'deltadental', 'decisely', 'enrollconfidently'];
+  const sortedSystemNames = Object.keys(systemGrouped).sort((a, b) => {
+    const aIdx = SYSTEM_ORDER.indexOf(a);
+    const bIdx = SYSTEM_ORDER.indexOf(b);
+    if (aIdx === -1 && bIdx === -1) return a.localeCompare(b);
+    if (aIdx === -1) return 1;
+    if (bIdx === -1) return -1;
+    return aIdx - bIdx;
+  });
+
+  // Sort a system's months newest-first, keeping 'unknown-' entries at the end.
+  function sortedMonthKeysForSystem(sysName: string): string[] {
+    return Object.keys(systemGrouped[sysName].months).sort((a, b) => {
       const aUnknown = a.startsWith('unknown-');
       const bUnknown = b.startsWith('unknown-');
       if (aUnknown && !bUnknown) return 1;
       if (!aUnknown && bUnknown) return -1;
       return b.localeCompare(a);
     });
+  }
+
+  // Month-first ordering used by the All Info browse view. No hardcoded cutoff -
+  // every month returned by /api/files renders here (Feb 2026 onwards, etc.).
+  const sortedMonthKeys = Object.keys(grouped).sort((a, b) => {
+    const aUnknown = a.startsWith('unknown-');
+    const bUnknown = b.startsWith('unknown-');
+    if (aUnknown && !bUnknown) return 1;
+    if (!aUnknown && bUnknown) return -1;
+    return b.localeCompare(a);
+  });
 
   // Define column lists for each master section
   const activeColumns: [keyof ActiveRow, string][] = [
@@ -1639,6 +1715,9 @@ export default function Dashboard() {
         .file-picker-btn:hover { background: #f0f0f0; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25); }
         .file-picker-btn:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
         .file-picker-name { display: inline-block; margin-left: 10px; font-size: 11px; color: rgba(255, 255, 255, 0.85); font-family: 'JetBrains Mono', 'Courier New', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; vertical-align: middle; }
+        .file-picker-cancel { display: inline-block; margin-left: 8px; background: transparent; color: rgba(255, 136, 136, 0.85); border: 1px solid rgba(255, 136, 136, 0.4); padding: 3px 10px; border-radius: 3px; font-family: 'Inter', sans-serif; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; cursor: pointer; vertical-align: middle; transition: all 0.15s ease; }
+        .file-picker-cancel:hover:not(:disabled) { background: rgba(255, 136, 136, 0.15); border-color: rgba(255, 136, 136, 0.7); }
+        .file-picker-cancel:disabled { opacity: 0.3; cursor: not-allowed; }
         .upload-col-action { width: 45%; }
         .upload-row-btn { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.4); padding: 5px 14px; border-radius: 4px; font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; margin-right: 6px; }
         .upload-row-btn:hover:not(:disabled) { background: rgba(107, 164, 255, 0.25); }
@@ -1755,6 +1834,16 @@ export default function Dashboard() {
         .month-heading { font-family: 'Fraunces', serif; font-size: 36px; font-weight: 500; color: #ffffff; margin: 0 0 24px; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 20px; }
         .month-heading::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(107, 164, 255, 0.4) 0%, transparent 100%); }
         .month-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); font-weight: 500; }
+
+        /* Source-first browse view (All Info): outer = source, inner box = month */
+        .source-block { margin-bottom: 64px; }
+        .source-heading { font-family: 'Fraunces', serif; font-size: 36px; font-weight: 500; color: #ffffff; margin: 0 0 24px; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 20px; }
+        .source-heading::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(107, 164, 255, 0.4) 0%, transparent 100%); }
+        .source-total-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); font-weight: 500; }
+        .month-subgroup { margin-bottom: 20px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: hidden; backdrop-filter: blur(20px); }
+        .month-subgroup-heading { padding: 16px 26px; background: rgba(77, 142, 255, 0.08); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; justify-content: space-between; align-items: center; }
+        .month-subgroup-heading h3 { font-family: 'Fraunces', serif; font-size: 18px; font-weight: 500; color: #ffffff; margin: 0; }
+        .month-subgroup-count { font-family: 'Inter', sans-serif; font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(255, 255, 255, 0.5); }
 
         .system-group { margin-bottom: 24px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: hidden; backdrop-filter: blur(20px); }
         .system-name { padding: 18px 28px; background: rgba(77, 142, 255, 0.08); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; justify-content: space-between; align-items: center; }
@@ -3410,7 +3499,19 @@ export default function Dashboard() {
                               style={{ display: 'none' }}
                             />
                           </label>
-                          {file && <span className="file-picker-name" title={file.name}>{file.name}</span>}
+                          {file && (
+                            <>
+                              <span className="file-picker-name" title={file.name}>{file.name}</span>
+                              <button
+                                className="file-picker-cancel"
+                                onClick={() => handleRowFileChange(label, null)}
+                                disabled={isBusy}
+                                title="Clear the selected file"
+                              >
+                                Cancel
+                              </button>
+                            </>
+                          )}
                         </td>
                         <td className="upload-col-action">
                           {/* Existing matches shown inline, always visible when present */}
