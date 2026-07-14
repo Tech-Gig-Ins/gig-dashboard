@@ -56,7 +56,7 @@ type SearchResponse = {
   results: SearchMatch[];
 };
 
-type TabKey = 'master' | 'all-info' | 'consultant' | 'billing';
+type TabKey = 'master' | 'all-info' | 'consultant' | 'billing' | 'billing-test';
 
 type MemberRecord = {
   memberName: string;
@@ -502,6 +502,24 @@ export default function Dashboard() {
   const [uploadComments, setUploadComments] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // ==================== BILLING TEST TAB STATE ====================
+  // Independent copy of the report so switching between Billing and Billing Test
+  // doesn't force one to re-load when the other's state changes.
+  const [billingTestReport, setBillingTestReport] = useState<BillingReport | null>(null);
+  const [billingTestLoading, setBillingTestLoading] = useState(false);
+  const [billingTestError, setBillingTestError] = useState<string | null>(null);
+  const [billingTestActiveSheet, setBillingTestActiveSheet] = useState<string>('');
+  // s3 key of the chat file most recently approved. When set, the top display
+  // shows THAT file instead of the default reconciliation output. Client-side
+  // only - resets when the page reloads.
+  const [billingTestApprovedKey, setBillingTestApprovedKey] = useState<string | null>(null);
+  // Approval passcode modal
+  const [approvalModalOpen, setApprovalModalOpen] = useState(false);
+  const [approvalTargetKey, setApprovalTargetKey] = useState<string | null>(null);
+  const [approvalTargetFilename, setApprovalTargetFilename] = useState<string | null>(null);
+  const [approvalPasscode, setApprovalPasscode] = useState('');
+  const [approvalError, setApprovalError] = useState<string | null>(null);
 
   // Load the All Info files listing. Extracted from useEffect so we can refresh
   // it after new files are uploaded via the upload modal.
@@ -959,6 +977,83 @@ export default function Dashboard() {
       loadUpdates();
     }
   }, [activeTab]);
+
+  // ==================== BILLING TEST DATA LOAD ====================
+  // Load whenever the tab becomes active OR the approved key changes.
+  // Chat updates are loaded via the same effect above (shared state).
+  useEffect(() => {
+    if (activeTab !== 'billing-test') return;
+    // Only trigger when we haven't already loaded, OR when the approved key
+    // differs from what's currently in the report.
+    const currentKey = billingTestReport?.sourceFile || null;
+    const desiredKey = billingTestApprovedKey; // null = default
+    if (!billingTestLoading && !billingTestError && currentKey === desiredKey && billingTestReport !== null) {
+      return;
+    }
+    // Also make sure the chat updates are loaded (same data as Billing tab)
+    if (updates.length === 0 && !updatesLoading && !updatesError) {
+      loadUpdates();
+    }
+    setBillingTestLoading(true);
+    setBillingTestError(null);
+    const url = billingTestApprovedKey
+      ? `/api/billing/report-file?key=${encodeURIComponent(billingTestApprovedKey)}`
+      : '/api/billing/report-file';
+    fetch(url)
+      .then(res => {
+        if (!res.ok) throw new Error(`Load failed: ${res.status}`);
+        return res.json();
+      })
+      .then((data: BillingReport) => {
+        setBillingTestReport(data);
+        // Default to the first sheet if the previously selected sheet doesn't exist
+        if (data.sheets && data.sheets.length > 0) {
+          const hasCurrent = data.sheets.some(s => s.name === billingTestActiveSheet);
+          if (!hasCurrent) setBillingTestActiveSheet(data.sheets[0].name);
+        }
+        setBillingTestLoading(false);
+      })
+      .catch((e: any) => {
+        setBillingTestError(e.message || 'Failed to load report');
+        setBillingTestLoading(false);
+      });
+  }, [activeTab, billingTestApprovedKey]);
+
+  // ==================== APPROVAL FLOW ====================
+  function openApprovalModal(u: BillingUpdate) {
+    if (!u.s3Key) return;
+    setApprovalTargetKey(u.s3Key);
+    setApprovalTargetFilename(u.filename || u.s3Key.split('/').pop() || null);
+    setApprovalPasscode('');
+    setApprovalError(null);
+    setApprovalModalOpen(true);
+  }
+  function closeApprovalModal() {
+    setApprovalModalOpen(false);
+    setApprovalTargetKey(null);
+    setApprovalTargetFilename(null);
+    setApprovalPasscode('');
+    setApprovalError(null);
+  }
+  function submitApproval() {
+    if (approvalPasscode !== 'AndrewGig') {
+      setApprovalError('Incorrect passcode');
+      return;
+    }
+    if (!approvalTargetKey) {
+      setApprovalError('No file selected');
+      return;
+    }
+    // Force a reload by resetting billingTestReport, then setting the approved key
+    setBillingTestReport(null);
+    setBillingTestApprovedKey(approvalTargetKey);
+    closeApprovalModal();
+  }
+  function resetToDefaultBillingTest() {
+    // Return to the default reconciliation file (clears any prior approval)
+    setBillingTestReport(null);
+    setBillingTestApprovedKey(null);
+  }
 
   function loadUpdates() {
     setUpdatesLoading(true);
@@ -1741,6 +1836,37 @@ export default function Dashboard() {
         .upload-addnew-btn { background: rgba(80, 200, 120, 0.15); color: #80d090; border: 1px solid rgba(80, 200, 120, 0.4); }
         .upload-addnew-btn:hover { background: rgba(80, 200, 120, 0.25); border-color: rgba(80, 200, 120, 0.7); }
         .upload-notice { padding: 12px 16px; margin-bottom: 14px; background: rgba(80, 200, 120, 0.08); border: 1px solid rgba(80, 200, 120, 0.3); border-left: 3px solid rgba(80, 200, 120, 0.7); border-radius: 6px; font-size: 12px; color: rgba(200, 240, 210, 0.95); }
+
+        /* ==================== BILLING TEST TAB ==================== */
+        .bt-sheet-viewer { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; overflow: hidden; margin-bottom: 32px; backdrop-filter: blur(20px); }
+        .bt-sheet-tabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 8px 8px 0; background: rgba(77, 142, 255, 0.06); border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+        .bt-sheet-tab { background: rgba(255, 255, 255, 0.04); color: rgba(255, 255, 255, 0.6); border: 1px solid rgba(255, 255, 255, 0.08); border-bottom: none; padding: 8px 16px; border-radius: 6px 6px 0 0; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
+        .bt-sheet-tab:hover { background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.85); }
+        .bt-sheet-tab.active { background: rgba(107, 164, 255, 0.2); color: #6ba4ff; border-color: rgba(107, 164, 255, 0.5); }
+        .bt-sheet-scroll { max-height: 620px; overflow: auto; }
+        .bt-sheet-table { border-collapse: collapse; font-size: 12px; font-family: 'JetBrains Mono', 'Courier New', monospace; color: rgba(255, 255, 255, 0.85); width: 100%; }
+        .bt-sheet-table td { padding: 6px 12px; border: 1px solid rgba(255, 255, 255, 0.05); white-space: nowrap; vertical-align: top; }
+        .bt-sheet-table tr:nth-child(even) td { background: rgba(255, 255, 255, 0.015); }
+        .bt-sheet-table tr:hover td { background: rgba(107, 164, 255, 0.05); }
+
+        /* Approve button on chat entries (Billing Test tab only) */
+        .update-approve-btn { background: rgba(255, 100, 140, 0.15); color: #ff6b8f; border: 1px solid rgba(255, 100, 140, 0.5); padding: 6px 14px; border-radius: 5px; font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; cursor: pointer; margin-left: 6px; transition: all 0.15s ease; }
+        .update-approve-btn:hover { background: rgba(255, 100, 140, 0.28); border-color: rgba(255, 100, 140, 0.85); }
+
+        /* Approval passcode modal */
+        .approval-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 440px; max-width: 90vw; background: rgba(15, 25, 55, 0.96); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; backdrop-filter: blur(20px); z-index: 1001; box-shadow: 0 20px 80px rgba(0, 0, 0, 0.6); }
+        .approval-modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 26px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+        .approval-modal-header h3 { margin: 0; font-family: 'Fraunces', serif; font-size: 20px; color: #ffffff; font-weight: 500; }
+        .approval-modal-body { padding: 22px 26px; }
+        .approval-modal-info { margin: 0 0 20px; font-size: 13px; color: rgba(255, 255, 255, 0.7); line-height: 1.5; }
+        .approval-modal-info strong { color: rgba(255, 255, 255, 0.95); }
+        .approval-modal-label { display: block; margin-bottom: 8px; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: rgba(255, 255, 255, 0.55); font-weight: 600; }
+        .approval-passcode-input { width: 100%; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.15); color: #ffffff; padding: 10px 14px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 14px; outline: none; transition: border-color 0.15s ease; }
+        .approval-passcode-input:focus { border-color: rgba(107, 164, 255, 0.6); }
+        .approval-error { margin-top: 10px; color: #ff8888; font-size: 12px; }
+        .approval-modal-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 26px; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+        .approval-submit-btn { background: rgba(255, 100, 140, 0.2); color: #ff6b8f; border: 1px solid rgba(255, 100, 140, 0.6); padding: 8px 22px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 700; cursor: pointer; transition: all 0.15s ease; }
+        .approval-submit-btn:hover { background: rgba(255, 100, 140, 0.35); border-color: rgba(255, 100, 140, 0.85); }
         .upload-modal-footer { padding: 16px 26px; border-top: 1px solid rgba(255, 255, 255, 0.08); display: flex; justify-content: flex-end; }
 
         .master-table-wrapper { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: auto; max-height: 65vh; backdrop-filter: blur(20px); }
@@ -1934,6 +2060,7 @@ export default function Dashboard() {
           <button className={`tab-btn ${activeTab === 'all-info' ? 'active' : ''}`} onClick={() => setActiveTab('all-info')}>All Info</button>
           <button className={`tab-btn ${activeTab === 'consultant' ? 'active' : ''}`} onClick={() => setActiveTab('consultant')}>Consultant Report</button>
           <button className={`tab-btn ${activeTab === 'billing' ? 'active' : ''}`} onClick={() => setActiveTab('billing')}>Billing</button>
+          <button className={`tab-btn ${activeTab === 'billing-test' ? 'active' : ''}`} onClick={() => setActiveTab('billing-test')}>Billing Test</button>
         </div>
       </section>
 
@@ -3411,6 +3538,184 @@ export default function Dashboard() {
             )}
           </div>
         )}
+
+        {/* ==================== BILLING TEST TAB ==================== */}
+        {activeTab === 'billing-test' && (
+          <div className="billing-dashboard">
+            {billingTestLoading && <div className="loading-state">Loading file...</div>}
+            {billingTestError && <div className="error-state">Error: {billingTestError}</div>}
+            {!billingTestLoading && !billingTestError && billingTestReport && (
+              <>
+                <div className="billing-header-row">
+                  <div className="billing-title-block">
+                    <h2>Billing Test - Raw File Viewer</h2>
+                    <div className="billing-subtitle">
+                      Displaying: {billingTestReport.sourceFile ? billingTestReport.sourceFile.split('/').pop() : 'no file loaded'}
+                      {billingTestApprovedKey && (
+                        <> · <span style={{ color: '#80d090', fontWeight: 600 }}>APPROVED FILE FROM CHAT</span></>
+                      )}
+                    </div>
+                  </div>
+                  {billingTestApprovedKey && (
+                    <button className="billing-refresh-btn" onClick={resetToDefaultBillingTest}>
+                      Reset to Default File
+                    </button>
+                  )}
+                </div>
+
+                {billingTestReport.sheets.length === 0 ? (
+                  <div className="empty-state" style={{ padding: 32 }}>{billingTestReport.message || 'No sheets in this file.'}</div>
+                ) : (
+                  <div className="bt-sheet-viewer">
+                    {/* Sheet tabs */}
+                    <div className="bt-sheet-tabs">
+                      {billingTestReport.sheets.map(s => (
+                        <button
+                          key={s.name}
+                          className={`bt-sheet-tab ${billingTestActiveSheet === s.name ? 'active' : ''}`}
+                          onClick={() => setBillingTestActiveSheet(s.name)}
+                          title={s.title || undefined}
+                        >
+                          {s.name}
+                        </button>
+                      ))}
+                    </div>
+                    {/* Active sheet content */}
+                    {(() => {
+                      const active = billingTestReport.sheets.find(s => s.name === billingTestActiveSheet)
+                        || billingTestReport.sheets[0];
+                      if (!active) return null;
+                      const cells = active.cells;
+                      const maxCols = cells.reduce((m, r) => Math.max(m, r.length), 0);
+                      return (
+                        <div className="bt-sheet-scroll">
+                          <table className="bt-sheet-table">
+                            <tbody>
+                              {cells.map((row, ri) => (
+                                <tr key={ri}>
+                                  {Array.from({ length: maxCols }).map((_, ci) => {
+                                    const v = row[ci];
+                                    const display = v === null || v === undefined ? '' : String(v);
+                                    return <td key={ci}>{display}</td>;
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Report Updates section - SAME chat data as Billing tab, with Approve button */}
+                <div className="report-updates-section">
+                  <h3 className="report-updates-heading">Report Updates</h3>
+                  <div className="report-updates-subheading">
+                    Post follow-ups, corrections, or attachments about this report. Attached files can be approved to replace the display above.
+                    {updates.length > 0 && ` · ${updates.length} update${updates.length === 1 ? '' : 's'}`}
+                  </div>
+
+                  {updatesLoading && <div className="loading-state">Loading updates...</div>}
+                  {updatesError && <div className="error-state">Error: {updatesError}</div>}
+
+                  {!updatesLoading && !updatesError && (
+                    <>
+                      <div className="updates-list">
+                        {updates.length === 0 ? (
+                          <div className="empty-state" style={{ padding: 32 }}>No updates yet. Be the first to post.</div>
+                        ) : (
+                          updates.map((u) => (
+                            <div key={u.id} className="update-card">
+                              <div className="update-card-head">
+                                <span className="update-name">{u.name}</span>
+                                <span className="update-date">{formatUpdateDate(u.date)}</span>
+                              </div>
+                              <div className="update-comments">{u.comments}</div>
+                              {u.filename && u.s3Key && (
+                                <div className="update-file-row">
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'rgba(107,164,255,0.7)' }}>
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                    <polyline points="14 2 14 8 20 8" />
+                                  </svg>
+                                  <span className="update-filename">{u.filename}</span>
+                                  {u.size !== null && <span className="update-filesize">{formatFileSize(u.size)}</span>}
+                                  <button className="update-download-btn" onClick={() => downloadUpdateFile(u)}>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                      <polyline points="7 10 12 15 17 10" />
+                                      <line x1="12" y1="15" x2="12" y2="3" />
+                                    </svg>
+                                    Download
+                                  </button>
+                                  <button
+                                    className="update-approve-btn"
+                                    onClick={() => openApprovalModal(u)}
+                                    title="Approve this file to replace the display above (requires passcode)"
+                                  >
+                                    Approve
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      <form className="upload-form" onSubmit={submitUpdate}>
+                        <div className="upload-form-title">Post a new update</div>
+                        {uploadError && <div className="upload-error">{uploadError}</div>}
+
+                        <div className="upload-form-row">
+                          <label>Your name <span className="required">*</span></label>
+                          <input
+                            className="upload-input"
+                            type="text"
+                            value={uploadName}
+                            onChange={(e) => setUploadName(e.target.value)}
+                            placeholder="e.g. Kowshik B"
+                            disabled={uploading}
+                            maxLength={100}
+                          />
+                        </div>
+
+                        <div className="upload-form-row">
+                          <label>Comments <span className="required">*</span></label>
+                          <textarea
+                            className="upload-input"
+                            value={uploadComments}
+                            onChange={(e) => setUploadComments(e.target.value)}
+                            placeholder="What's this update about?"
+                            disabled={uploading}
+                            maxLength={2000}
+                            rows={3}
+                          />
+                        </div>
+
+                        <div className="upload-form-row">
+                          <label>Attachment (optional)</label>
+                          <input
+                            id="billing-upload-file-test"
+                            className="upload-file-input"
+                            type="file"
+                            onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                            disabled={uploading}
+                          />
+                        </div>
+
+                        <div className="upload-form-actions">
+                          <button className="upload-submit-btn" type="submit" disabled={uploading}>
+                            {uploading ? 'Posting...' : 'Post update'}
+                          </button>
+                        </div>
+                      </form>
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </section>
 
       <div className="wave-container">
@@ -3430,6 +3735,39 @@ export default function Dashboard() {
           </svg>
         </div>
       </div>
+
+      {/* APPROVAL PASSCODE MODAL - Billing Test tab, rendered at root level */}
+      {approvalModalOpen && (
+        <>
+          <div className="upload-modal-overlay" onClick={closeApprovalModal} />
+          <div className="approval-modal">
+            <div className="approval-modal-header">
+              <h3>Approve File</h3>
+              <button className="close-btn" onClick={closeApprovalModal}>Close</button>
+            </div>
+            <div className="approval-modal-body">
+              <p className="approval-modal-info">
+                Approving <strong>{approvalTargetFilename || 'this file'}</strong> will replace the file currently displayed at the top of the Billing Test tab.
+              </p>
+              <label className="approval-modal-label">Passcode</label>
+              <input
+                type="password"
+                className="approval-passcode-input"
+                value={approvalPasscode}
+                onChange={e => { setApprovalPasscode(e.target.value); setApprovalError(null); }}
+                onKeyDown={e => { if (e.key === 'Enter') submitApproval(); }}
+                autoFocus
+                placeholder="Enter passcode..."
+              />
+              {approvalError && <div className="approval-error">{approvalError}</div>}
+            </div>
+            <div className="approval-modal-footer">
+              <button className="close-btn" onClick={closeApprovalModal}>Cancel</button>
+              <button className="approval-submit-btn" onClick={submitApproval}>Approve</button>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* UPLOAD FILES MODAL - rendered at root level so it's available from any tab */}
       {uploadModalOpen && (
