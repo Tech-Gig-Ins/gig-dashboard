@@ -307,11 +307,36 @@ function groupFilesBySystem(files: FileRow[]): SystemGrouped {
   return result;
 }
 
+// Canonical list of the 17 files expected each month. Kept in sync with the
+// backend list in app/api/master/route.ts. Used to group files in the All Info
+// tab by their classified label, and by the upload modal.
+const CANONICAL_FILES = [
+  'Cassena Remittance',
+  'Cassena Credits',
+  'EP6 Remittance',
+  'NYP Remittance',
+  'BDSB Remittance',
+  'BDSB Credits',
+  'Corechoice T1',
+  'Corechoice T3',
+  'Gig Remittance',
+  'Gig Credits',
+  'Delta Dental',
+  'GWU3 Remittance',
+  'GWU3 Credits',
+  'Northstead Remittance',
+  'Northstead Credits',
+  'Refresh',
+  'Enroll Confidently or PIOPAC',
+];
+
 function groupFiles(files: FileRow[]): DoubleGrouped {
   const result: DoubleGrouped = {};
   for (const file of files) {
-    const sysMatch = file.key.match(/^carrier=([^/]+)\//);
-    const system = sysMatch ? sysMatch[1] : 'unknown';
+    // Group by canonical file label (Cassena Remittance, BDSB Credits, Refresh, etc.)
+    // instead of the S3 carrier folder (gig, tpa, decisely, ...). Files that don't
+    // classify cleanly land in 'unknown' and appear at the bottom under "Unclassified".
+    const system = classifyFile(file.filename);
     const detected = detectMonthYear(file.filename);
     let year: number, month: number;
     if (detected) {
@@ -386,25 +411,6 @@ export default function Dashboard() {
   const [masterError, setMasterError] = useState<string | null>(null);
 
   // Upload files modal state
-  const CANONICAL_FILES = [
-    'Cassena Remittance',
-    'Cassena Credits',
-    'EP6 Remittance',
-    'NYP Remittance',
-    'BDSB Remittance',
-    'BDSB Credits',
-    'Corechoice T1',
-    'Corechoice T3',
-    'Gig Remittance',
-    'Gig Credits',
-    'Delta Dental',
-    'GWU3 Remittance',
-    'GWU3 Credits',
-    'Northstead Remittance',
-    'Northstead Credits',
-    'Refresh',
-    'Enroll Confidently or PIOPAC',
-  ];
   type UploadRowStatus =
     | { kind: 'idle' }
     | { kind: 'uploading' }
@@ -1799,6 +1805,7 @@ export default function Dashboard() {
         /* Approve button on chat entries (Billing tab only) */
         .update-approve-btn { background: rgba(255, 100, 140, 0.15); color: #ff6b8f; border: 1px solid rgba(255, 100, 140, 0.5); padding: 6px 14px; border-radius: 5px; font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; cursor: pointer; margin-left: 6px; transition: all 0.15s ease; }
         .update-approve-btn:hover { background: rgba(255, 100, 140, 0.28); border-color: rgba(255, 100, 140, 0.85); }
+        .update-approved-tag { display: inline-block; background: rgba(80, 200, 120, 0.15); color: #80d090; border: 1px solid rgba(80, 200, 120, 0.5); padding: 6px 14px; border-radius: 5px; font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; margin-left: 6px; cursor: default; user-select: none; }
 
         /* Approval passcode modal */
         .approval-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 440px; max-width: 90vw; background: rgba(15, 25, 55, 0.96); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; backdrop-filter: blur(20px); z-index: 1001; box-shadow: 0 20px 80px rgba(0, 0, 0, 0.6); }
@@ -2161,10 +2168,18 @@ export default function Dashboard() {
                         {monthBlock.label}
                         <span className="month-count">{fileCount} file{fileCount !== 1 ? 's' : ''}</span>
                       </h2>
-                      {Object.keys(monthBlock.systems).sort().map((system) => (
+                      {Object.keys(monthBlock.systems).sort((a, b) => {
+                        // Sort in canonical order; unknown/unclassified last
+                        const aIdx = CANONICAL_FILES.indexOf(a);
+                        const bIdx = CANONICAL_FILES.indexOf(b);
+                        if (aIdx === -1 && bIdx === -1) return a.localeCompare(b);
+                        if (aIdx === -1) return 1;
+                        if (bIdx === -1) return -1;
+                        return aIdx - bIdx;
+                      }).map((system) => (
                         <div key={system} className="system-group">
                           <div className="system-name">
-                            <h3>{prettifySystemName(system)}</h3>
+                            <h3>{system === 'unknown' ? 'Unclassified' : system}</h3>
                             <span className="system-count">{monthBlock.systems[system].length} file{monthBlock.systems[system].length !== 1 ? 's' : ''}</span>
                           </div>
                           <ul className="file-list">
@@ -3029,13 +3044,22 @@ export default function Dashboard() {
                                     </svg>
                                     Download
                                   </button>
-                                  <button
-                                    className="update-approve-btn"
-                                    onClick={() => openApprovalModal(u)}
-                                    title="Approve this file to replace the display above (requires passcode)"
-                                  >
-                                    Approve
-                                  </button>
+                                  {billingReport?.approvedKey === u.s3Key ? (
+                                    <span
+                                      className="update-approved-tag"
+                                      title="This file is the currently approved display"
+                                    >
+                                      ✓ Approved
+                                    </span>
+                                  ) : (
+                                    <button
+                                      className="update-approve-btn"
+                                      onClick={() => openApprovalModal(u)}
+                                      title="Approve this file to replace the display above (requires passcode)"
+                                    >
+                                      Approve
+                                    </button>
+                                  )}
                                 </div>
                               )}
                             </div>
