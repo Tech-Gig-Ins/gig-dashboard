@@ -1,12 +1,25 @@
 // Located at: app/api/master/route.ts
 //
-// Builds the Master Dashboard data with three sections:
-// - activeMembers: unique members in the LATEST month available
-// - terminatedMembers: members in older month but missing from next month (term date = end of older month)
-// - newMembers: members in newer month but missing from previous month (effective date = first of newer month)
+// Builds the Master Dashboard data with three sections. All three use per-file
+// comparison semantics: each canonical file is evaluated on its own timeline
+// (its latest upload vs its second-latest upload), so a missing monthly upload
+// for one file never affects other files' data.
 //
-// Fetches all files from June 2026 onwards (no upper bound, so future months auto-appear
-// when their files land in S3). Member identity: normalized name + file classification + normalized group.
+//   - activeMembers:     union of every canonical file's LATEST-AVAILABLE upload.
+//                        If Northstead is missing in July but present in June,
+//                        June's Northstead members are still counted as active.
+//   - terminatedMembers: for each file, members in its second-latest upload but
+//                        not in its latest upload (term date = end of the
+//                        second-latest upload's month).
+//   - newMembers:        for each file, members in its latest upload but not in
+//                        its second-latest upload (effective date = first of
+//                        the latest upload's month).
+//
+// Files that have only ever been uploaded once contribute to activeMembers but
+// not to terminated/new (no basis for comparison).
+//
+// Fetches all files from June 2026 onwards. Member identity: normalized name +
+// file classification + normalized group.
 
 import { NextResponse } from 'next/server';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
@@ -571,57 +584,85 @@ export async function GET() {
       });
     }
 
-    // Active members = whoever is in the LATEST month with data.
-    // monthData is sorted oldest -> newest, so last element is the newest month.
-    const latestMonth = monthData.length > 0 ? monthData[monthData.length - 1] : null;
-    const activeMembers: MasterActiveRow[] = latestMonth
-      ? Array.from(latestMonth.identityMap.values())
-      : [];
+    // ---------- Active / Terminated / New (per-file semantics with fallback) ----------
+    //
+    // The three tables now share a single "per canonical file" comparison model.
+    // Each file has its own timeline of months it appeared in. For each file:
+    //   * activeLatest = the most recent month that file was uploaded ("current" data)
+    //   * activePrior  = the SECOND most recent month it was uploaded (previous data)
+    //
+    // If a file wasn't uploaded this month but was uploaded before, its members
+    // still count as active - we fall back to whatever the latest available month
+    // is for that file. Terminated / New compare activeLatest vs activePrior for
+    // that file, so missing uploads never create false terminations or false new
+    // members.
+    const latestMonthByFile = new Map<string, MonthData>();
+    const priorMonthByFile = new Map<string, MonthData>();
+    for (const canonicalFile of CANONICAL_FILES) {
+      const found: MonthData[] = [];
+      for (let i = monthData.length - 1; i >= 0; i--) {
+        if ((labelsByMonth.get(monthData[i].mk) || new Set<string>()).has(canonicalFile)) {
+          found.push(monthData[i]);
+          if (found.length === 2) break;
+        }
+      }
+      if (found.length >= 1) latestMonthByFile.set(canonicalFile, found[0]);
+      if (found.length >= 2) priorMonthByFile.set(canonicalFile, found[1]);
+    }
 
-    // Terminated: for each consecutive pair (older, newer), members in older NOT in newer.
-    // BUT: if the person's file was missing entirely from the newer month, we can't tell
-    // whether they actually terminated - the whole group's data is just absent. Skip them.
-    // Termination date = last day of older month.
+    // Active: union of members from every file's latest-available upload.
+    // A member can appear once per file/group combination (identityKey handles this).
+    const activeMembers: MasterActiveRow[] = [];
+    const activeIdsSeen = new Set<string>();
+    for (const canonicalFile of CANONICAL_FILES) {
+      const src = latestMonthByFile.get(canonicalFile);
+      if (!src) continue;
+      for (const [id, record] of src.identityMap) {
+        if (record.file !== canonicalFile) continue;
+        if (activeIdsSeen.has(id)) continue;
+        activeMembers.push(record);
+        activeIdsSeen.add(id);
+      }
+    }
+
+    // Terminated: for each file, members in its activePrior upload but not in
+    // its activeLatest upload. Termination date = last day of the prior month.
+    // Files with fewer than 2 uploads contribute nothing (no basis for comparison).
     const terminatedMembers: MasterTerminatedRow[] = [];
-    for (let i = 0; i < monthData.length - 1; i++) {
-      const older = monthData[i];
-      const newer = monthData[i + 1];
-      const newerLabels = labelsByMonth.get(newer.mk) || new Set<string>();
-      for (const [id, record] of older.identityMap) {
-        if (!newer.identityMap.has(id)) {
-          // Skip if this person's file wasn't uploaded to the newer month at all
-          if (!newerLabels.has(record.file)) continue;
-          terminatedMembers.push({
-            ...record,
-            terminationDate: lastDayOfMonth(older.year, older.month),
-          });
-        }
+    for (const canonicalFile of CANONICAL_FILES) {
+      const latest = latestMonthByFile.get(canonicalFile);
+      const prior = priorMonthByFile.get(canonicalFile);
+      if (!latest || !prior) continue;
+      for (const [id, record] of prior.identityMap) {
+        if (record.file !== canonicalFile) continue;
+        if (latest.identityMap.has(id)) continue;
+        terminatedMembers.push({
+          ...record,
+          terminationDate: lastDayOfMonth(prior.year, prior.month),
+        });
       }
     }
 
-    // New: for each consecutive pair (older, newer), members in newer NOT in older.
-    // BUT: if the person's file was missing entirely from the older month, we can't tell
-    // whether they're actually new - the whole group's data was just absent. Skip them.
-    // Effective date = first day of newer month. Skip the oldest month entirely (baseline).
+    // New: for each file, members in its activeLatest upload but not in its
+    // activePrior upload. Effective date = first day of the latest month.
     const newMembers: MasterNewRow[] = [];
-    for (let i = 1; i < monthData.length; i++) {
-      const older = monthData[i - 1];
-      const newer = monthData[i];
-      const olderLabels = labelsByMonth.get(older.mk) || new Set<string>();
-      for (const [id, record] of newer.identityMap) {
-        if (!older.identityMap.has(id)) {
-          // Skip if this person's file wasn't in the older month at all
-          if (!olderLabels.has(record.file)) continue;
-          newMembers.push({
-            ...record,
-            effectiveDate: firstDayOfMonth(newer.year, newer.month),
-          });
-        }
+    for (const canonicalFile of CANONICAL_FILES) {
+      const latest = latestMonthByFile.get(canonicalFile);
+      const prior = priorMonthByFile.get(canonicalFile);
+      if (!latest || !prior) continue;
+      for (const [id, record] of latest.identityMap) {
+        if (record.file !== canonicalFile) continue;
+        if (prior.identityMap.has(id)) continue;
+        newMembers.push({
+          ...record,
+          effectiveDate: firstDayOfMonth(latest.year, latest.month),
+        });
       }
     }
 
-    // Compute missing files for latest and previous months.
-    // Latest month drives the Active Members table; previous drives Terminated + New.
+    // Compute missing files for latest and previous months (used by the UI to
+    // filter which file-timeline entries to show as "currently missing").
+    const latestMonth = monthData.length > 0 ? monthData[monthData.length - 1] : null;
     const previousMonth = monthData.length > 1 ? monthData[monthData.length - 2] : null;
 
     const latestMonthKey = latestMonth?.mk;

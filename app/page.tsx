@@ -2293,9 +2293,33 @@ export default function Dashboard() {
                     </h2>
                     {masterData.latestMonthLabel && (
                       masterData.latestMonthMissingFiles.length > 0 ? (
-                        <div className="master-missing-files">
-                          <span className="master-missing-label">Missing files for {masterData.latestMonthLabel}:</span>
-                          <span className="master-missing-list">{masterData.latestMonthMissingFiles.join(', ')}</span>
+                        <div className="file-timelines">
+                          <div className="file-timelines-heading">
+                            Files missing in {masterData.latestMonthLabel} (active data falls back to their last available month):
+                          </div>
+                          {masterData.fileTimelines
+                            .filter(t => masterData.latestMonthMissingFiles.includes(t.file))
+                            .map(t => (
+                              <div key={t.file} className="file-timeline-row">
+                                <div className="file-timeline-header">
+                                  <span className="file-timeline-name">{t.file}:</span>{' '}
+                                  <span className="file-timeline-last-label">Last Updated Month:</span>{' '}
+                                  <span className="file-timeline-last">{t.lastUpdatedMonth || 'Never uploaded'}</span>
+                                </div>
+                                <div className="file-timeline-history">
+                                  {t.history.map((entry, i) => (
+                                    <span key={i} className="file-timeline-entry">
+                                      <span className="file-timeline-month">{entry.month}</span>{' '}
+                                      {entry.present ? (
+                                        <span className="file-timeline-check">✓</span>
+                                      ) : (
+                                        <span className="file-timeline-missing">(Missing)</span>
+                                      )}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
                         </div>
                       ) : (
                         <div className="master-missing-files master-missing-files-none">
