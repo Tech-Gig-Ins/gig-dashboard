@@ -1843,9 +1843,8 @@ export default function Dashboard() {
         .billing-header-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 32px; flex-wrap: wrap; }
         .billing-title-block h2 { font-family: 'Fraunces', serif; font-size: 32px; font-weight: 500; color: #ffffff; margin: 0 0 6px; letter-spacing: -0.02em; }
         .billing-title-block .billing-subtitle { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); }
-        .billing-download-btn { display: flex; align-items: center; gap: 8px; padding: 14px 22px; background: rgba(74, 222, 128, 0.12); border: 1px solid rgba(74, 222, 128, 0.35); border-radius: 12px; color: #4ade80; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; white-space: nowrap; }
-        .billing-download-btn:hover { background: rgba(74, 222, 128, 0.22); border-color: rgba(74, 222, 128, 0.6); color: #ffffff; box-shadow: 0 4px 16px rgba(74, 222, 128, 0.2); }
-        .billing-download-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .billing-download-btn { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.4); padding: 10px 20px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; display: inline-flex; align-items: center; }
+        .billing-download-btn:hover { background: rgba(107, 164, 255, 0.28); border-color: rgba(107, 164, 255, 0.7); }
         .billing-section { margin-bottom: 48px; }
         .billing-section-heading { font-family: 'Fraunces', serif; font-size: 24px; font-weight: 500; color: #ffffff; margin: 0 0 18px; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 16px; }
         .billing-section-heading::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(107, 164, 255, 0.4) 0%, transparent 100%); }
@@ -2936,6 +2935,23 @@ export default function Dashboard() {
                       )}
                     </div>
                   </div>
+                  {billingReport.sourceFile && (
+                    <button
+                      className="billing-download-btn"
+                      onClick={() => handleDownload(
+                        billingReport.sourceFile!,
+                        billingReport.filename || billingReport.sourceFile!.split('/').pop() || 'billing.xlsx'
+                      )}
+                      title="Download the currently displayed Excel file"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 8, verticalAlign: '-2px' }}>
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      Download Excel
+                    </button>
+                  )}
                 </div>
 
                 {billingReport.sheets.length === 0 ? (
