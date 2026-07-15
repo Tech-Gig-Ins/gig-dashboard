@@ -110,7 +110,14 @@ function hasCurrencySign(fmt: string): boolean {
 }
 
 function formatNumberWithFmt(n: number, fmt: string | undefined): string {
-  if (!fmt || fmt === 'General' || fmt === '@') return String(n);
+  if (!fmt || fmt === 'General' || fmt === '@') {
+    // No explicit format on the cell. Excel silently rounds these on display,
+    // which is why "4681.1" looks like 4681.1 in the source file even though
+    // the underlying double reads back as 4681.0999999999985. Do the same:
+    // integers stay integers, everything else renders with 2 decimals.
+    if (Number.isInteger(n)) return String(n);
+    return n.toFixed(2);
+  }
 
   // Excel format codes can have multiple sections separated by ; -
   //   positive;negative;zero;text
