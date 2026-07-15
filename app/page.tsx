@@ -56,7 +56,7 @@ type SearchResponse = {
   results: SearchMatch[];
 };
 
-type TabKey = 'master' | 'all-info' | 'consultant' | 'billing' | 'billing-test';
+type TabKey = 'master' | 'all-info' | 'consultant' | 'billing';
 
 type MemberRecord = {
   memberName: string;
@@ -473,18 +473,9 @@ export default function Dashboard() {
   const [appliedConsultantFilters, setAppliedConsultantFilters] = useState<ConsultantFilterState>(emptyConsultantFilter);
 
   // Billing tab state
-  type BillingCellValue = string | number | null;
-  type BillingSheet = { name: string; title: string | null; cells: BillingCellValue[][] };
-  type BillingReport = {
-    sourceFile: string | null;
-    lastModified: string | null;
-    reportMonth: string | null;
-    sheets: BillingSheet[];
-    message?: string;
-  };
-  // Rich sheet data with formatting - used by Billing Test tab only.
+  // Rich sheet data with formatting - used by Billing tab.
   // Field names are short to keep the JSON payload small.
-  type BillingTestCell = {
+  type BillingCell = {
     v: string;
     bg?: string; fg?: string;
     b?: boolean; i?: boolean;
@@ -493,13 +484,13 @@ export default function Dashboard() {
     rs?: number; cs?: number;
     hidden?: boolean;
   };
-  type BillingTestSheet = { name: string; cells: BillingTestCell[][]; columnWidths: number[] };
-  type BillingTestReport = {
+  type BillingSheet = { name: string; cells: BillingCell[][]; columnWidths: number[] };
+  type BillingReport = {
     sourceFile: string | null;
     filename?: string;
     approvedKey: string | null;
     lastModified: string | null;
-    sheets: BillingTestSheet[];
+    sheets: BillingSheet[];
     message?: string;
   };
   type BillingUpdate = {
@@ -511,9 +502,6 @@ export default function Dashboard() {
     s3Key: string | null;
     size: number | null;
   };
-  const [billingReport, setBillingReport] = useState<BillingReport | null>(null);
-  const [billingLoading, setBillingLoading] = useState(false);
-  const [billingError, setBillingError] = useState<string | null>(null);
   const [updates, setUpdates] = useState<BillingUpdate[]>([]);
   const [updatesLoading, setUpdatesLoading] = useState(false);
   const [updatesError, setUpdatesError] = useState<string | null>(null);
@@ -523,13 +511,13 @@ export default function Dashboard() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  // ==================== BILLING TEST TAB STATE ====================
-  // Independent copy of the report so switching between Billing and Billing Test
-  // doesn't force one to re-load when the other's state changes.
-  const [billingTestReport, setBillingTestReport] = useState<BillingTestReport | null>(null);
-  const [billingTestLoading, setBillingTestLoading] = useState(false);
-  const [billingTestError, setBillingTestError] = useState<string | null>(null);
-  const [billingTestActiveSheet, setBillingTestActiveSheet] = useState<string>('');
+  // ==================== BILLING TAB STATE ====================
+  // Report state - rich Excel data with formatting
+  // 
+  const [billingReport, setBillingReport] = useState<BillingReport | null>(null);
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingError, setBillingError] = useState<string | null>(null);
+  const [billingActiveSheet, setBillingActiveSheet] = useState<string>('');
   // Approval passcode modal
   const [approvalModalOpen, setApprovalModalOpen] = useState(false);
   const [approvalTargetKey, setApprovalTargetKey] = useState<string | null>(null);
@@ -971,61 +959,37 @@ export default function Dashboard() {
   const activeConsultantFilterCount = countActiveConsultantFilters(appliedConsultantFilters);
 
   // ==================== BILLING TAB DATA + UPLOAD ====================
-  // Lazy load billing report + updates when the tab becomes active
+  // Manual refetch trigger for the Billing tab. Bumped after a successful
+  // approval so the sheet viewer reloads with the newly-approved file.
+  const [billingRefetchTick, setBillingRefetchTick] = useState(0);
+
   useEffect(() => {
     if (activeTab !== 'billing') return;
-    if (billingReport === null && !billingLoading && !billingError) {
-      setBillingLoading(true);
-      fetch('/api/billing/report')
-        .then(res => {
-          if (!res.ok) throw new Error(`Report API failed: ${res.status}`);
-          return res.json();
-        })
-        .then((data: BillingReport) => {
-          setBillingReport(data);
-          setBillingLoading(false);
-        })
-        .catch((e: any) => {
-          setBillingError(e.message || 'Failed to load billing report');
-          setBillingLoading(false);
-        });
-    }
-    if (updates.length === 0 && !updatesLoading && !updatesError) {
-      loadUpdates();
-    }
-  }, [activeTab]);
-
-  // Manual refetch trigger for the Billing Test tab. Bumped after a successful
-  // approval so the sheet viewer reloads with the newly-approved file.
-  const [billingTestRefetchTick, setBillingTestRefetchTick] = useState(0);
-
-  useEffect(() => {
-    if (activeTab !== 'billing-test') return;
     // Load the chat updates if not already loaded (shared with Billing tab)
     if (updates.length === 0 && !updatesLoading && !updatesError) {
       loadUpdates();
     }
-    setBillingTestLoading(true);
-    setBillingTestError(null);
+    setBillingLoading(true);
+    setBillingError(null);
     fetch('/api/billing/report-file')
       .then(res => {
         if (!res.ok) throw new Error(`Load failed: ${res.status}`);
         return res.json();
       })
-      .then((data: BillingTestReport) => {
-        setBillingTestReport(data);
+      .then((data: BillingReport) => {
+        setBillingReport(data);
         // Default to the first sheet if the previously selected one no longer exists
         if (data.sheets && data.sheets.length > 0) {
-          const hasCurrent = data.sheets.some(s => s.name === billingTestActiveSheet);
-          if (!hasCurrent) setBillingTestActiveSheet(data.sheets[0].name);
+          const hasCurrent = data.sheets.some(s => s.name === billingActiveSheet);
+          if (!hasCurrent) setBillingActiveSheet(data.sheets[0].name);
         }
-        setBillingTestLoading(false);
+        setBillingLoading(false);
       })
       .catch((e: any) => {
-        setBillingTestError(e.message || 'Failed to load report');
-        setBillingTestLoading(false);
+        setBillingError(e.message || 'Failed to load report');
+        setBillingLoading(false);
       });
-  }, [activeTab, billingTestRefetchTick]);
+  }, [activeTab, billingRefetchTick]);
 
   // ==================== APPROVAL FLOW ====================
   function openApprovalModal(u: BillingUpdate) {
@@ -1073,8 +1037,8 @@ export default function Dashboard() {
       setApprovalTargetKey(null);
       setApprovalTargetFilename(null);
       setApprovalPasscode('');
-      setBillingTestReport(null);
-      setBillingTestRefetchTick(t => t + 1);
+      setBillingReport(null);
+      setBillingRefetchTick(t => t + 1);
     } catch (err: any) {
       setApprovalError(err.message || 'Network error');
       setApprovalSubmitting(false);
@@ -1134,27 +1098,6 @@ export default function Dashboard() {
     }
   }
 
-  // Format a currency value from a cell.
-  // Matches the Python reconciliation's MONEY_FMT ('$#,##0.00;($#,##0.00);"-"'),
-  // which displays exactly zero as "-" rather than "$0.00". Also treats missing
-  // values as "-" to avoid confusing "$0.00" placeholders in status columns.
-  function formatMoney(v: BillingCellValue): string {
-    if (v === null || v === undefined || v === '') return '-';
-    if (typeof v === 'number') {
-      if (v === 0) return '-';
-      return v.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-    }
-    const s = String(v).trim();
-    if (!s) return '-';
-    return s;
-  }
-
-  function formatCell(v: BillingCellValue): string {
-    if (v === null || v === undefined) return '';
-    if (typeof v === 'number') return String(v);
-    return String(v);
-  }
-
   function formatUpdateDate(iso: string): string {
     if (!iso) return '';
     try {
@@ -1171,26 +1114,6 @@ export default function Dashboard() {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  }
-
-  async function downloadReportFile() {
-    if (!billingReport?.sourceFile) return;
-    try {
-      const res = await fetch(`/api/download?key=${encodeURIComponent(billingReport.sourceFile)}`);
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.error || `Download failed: ${res.status}`);
-      }
-      const data: { url: string; filename: string } = await res.json();
-      const a = document.createElement('a');
-      a.href = data.url;
-      a.download = data.filename || 'Reconciliation_Output.xlsx';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    } catch (e: any) {
-      alert(`Download failed: ${e.message || 'Unknown error'}`);
-    }
   }
 
   async function downloadUpdateFile(u: BillingUpdate) {
@@ -1863,7 +1786,7 @@ export default function Dashboard() {
         .upload-addnew-btn:hover { background: rgba(80, 200, 120, 0.25); border-color: rgba(80, 200, 120, 0.7); }
         .upload-notice { padding: 12px 16px; margin-bottom: 14px; background: rgba(80, 200, 120, 0.08); border: 1px solid rgba(80, 200, 120, 0.3); border-left: 3px solid rgba(80, 200, 120, 0.7); border-radius: 6px; font-size: 12px; color: rgba(200, 240, 210, 0.95); }
 
-        /* ==================== BILLING TEST TAB ==================== */
+        /* ==================== BILLING TAB ==================== */
         .bt-sheet-viewer { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; overflow: hidden; margin-bottom: 32px; backdrop-filter: blur(20px); }
         .bt-sheet-tabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 8px 8px 0; background: rgba(77, 142, 255, 0.06); border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
         .bt-sheet-tab { background: rgba(255, 255, 255, 0.04); color: rgba(255, 255, 255, 0.6); border: 1px solid rgba(255, 255, 255, 0.08); border-bottom: none; padding: 8px 16px; border-radius: 6px 6px 0 0; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
@@ -1873,7 +1796,7 @@ export default function Dashboard() {
         .bt-sheet-table { border-collapse: collapse; font-size: 12px; font-family: 'Calibri', 'Segoe UI', Arial, sans-serif; color: #000000; background: #ffffff; }
         .bt-sheet-table td { padding: 3px 6px; border: 1px solid #d4d4d4; white-space: nowrap; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
 
-        /* Approve button on chat entries (Billing Test tab only) */
+        /* Approve button on chat entries (Billing tab only) */
         .update-approve-btn { background: rgba(255, 100, 140, 0.15); color: #ff6b8f; border: 1px solid rgba(255, 100, 140, 0.5); padding: 6px 14px; border-radius: 5px; font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; cursor: pointer; margin-left: 6px; transition: all 0.15s ease; }
         .update-approve-btn:hover { background: rgba(255, 100, 140, 0.28); border-color: rgba(255, 100, 140, 0.85); }
 
@@ -2086,7 +2009,6 @@ export default function Dashboard() {
           <button className={`tab-btn ${activeTab === 'all-info' ? 'active' : ''}`} onClick={() => setActiveTab('all-info')}>All Info</button>
           <button className={`tab-btn ${activeTab === 'consultant' ? 'active' : ''}`} onClick={() => setActiveTab('consultant')}>Consultant Report</button>
           <button className={`tab-btn ${activeTab === 'billing' ? 'active' : ''}`} onClick={() => setActiveTab('billing')}>Billing</button>
-          <button className={`tab-btn ${activeTab === 'billing-test' ? 'active' : ''}`} onClick={() => setActiveTab('billing-test')}>Billing Test</button>
         </div>
       </section>
 
@@ -2958,650 +2880,43 @@ export default function Dashboard() {
           </>
         )}
 
-        {/* BILLING TAB */}
+        {/* ==================== BILLING TAB ==================== */}
         {activeTab === 'billing' && (
           <div className="billing-dashboard">
-            {billingLoading && <div className="loading-state">Loading billing report...</div>}
-            {billingError && <div className="error-state">Error loading report: {billingError}</div>}
+            {billingLoading && <div className="loading-state">Loading file...</div>}
+            {billingError && <div className="error-state">Error: {billingError}</div>}
             {!billingLoading && !billingError && billingReport && (
               <>
                 <div className="billing-header-row">
                   <div className="billing-title-block">
-                    <h2>Refresh vs CardPointe Reconciliation</h2>
+                    <h2>Billing</h2>
                     <div className="billing-subtitle">
-                      {billingReport.reportMonth ? billingReport.reportMonth : 'Latest report'}
-                      {billingReport.sourceFile && (
-                        <> · Source: {billingReport.sourceFile.split('/').pop()}</>
-                      )}
-                    </div>
-                  </div>
-                  {billingReport.sourceFile && (
-                    <button className="billing-download-btn" onClick={downloadReportFile}>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                        <polyline points="7 10 12 15 17 10" />
-                        <line x1="12" y1="15" x2="12" y2="3" />
-                      </svg>
-                      Download Original Report
-                    </button>
-                  )}
-                </div>
-
-                {billingReport.message && (
-                  <div className="empty-state">{billingReport.message}</div>
-                )}
-
-                {billingReport.sheets.map((sheet) => {
-                  // Render each sheet based on its name; falls back to generic table view.
-                  const name = sheet.name;
-                  const cells = sheet.cells;
-
-                  if (name === 'Summary') {
-                    // Rows 2-8 (index 2..8) are label/value pairs; below are notes.
-                    // Only recognize known count labels (containing "enrollments") and
-                    // known money labels (containing "plan price" or "amount"). Everything else
-                    // is skipped - protects against spacer rows accidentally becoming metric cards.
-                    const metrics: { label: string; value: BillingCellValue; kind: 'count' | 'money' }[] = [];
-                    const notes: string[] = [];
-                    let notesStarted = false;
-                    for (let i = 2; i < cells.length; i++) {
-                      const row = cells[i];
-                      if (!row) continue;
-                      const label = row[0];
-                      const value = row[2];
-                      if (typeof label === 'string' && label.trim().toLowerCase().startsWith('notes')) {
-                        notesStarted = true;
-                        continue;
-                      }
-                      if (notesStarted) {
-                        if (typeof label === 'string' && label.trim()) notes.push(label);
-                        continue;
-                      }
-                      if (typeof label !== 'string' || !label.trim()) continue;
-                      // Value must be an actual number (not null, not empty string)
-                      if (typeof value !== 'number') continue;
-                      // Money labels contain "plan price" or "total amount".
-                      // Count labels contain "enrollments", "matched", or "missing" (case-insensitive).
-                      // Order matters: check money FIRST because "Total plan price in Refresh (all enrollments)"
-                      // also contains the word "enrollments" and would otherwise be misclassified.
-                      const isMoney = /plan price|total amount/i.test(label);
-                      const isCount = !isMoney && /enrollments|matched|missing/i.test(label);
-                      if (!isCount && !isMoney) continue;
-                      metrics.push({ label: label.trim(), value, kind: isCount ? 'count' : 'money' });
-                    }
-                    return (
-                      <div key={name} className="billing-section">
-                        <h3 className="billing-section-heading">
-                          Summary
-                          <span className="billing-section-pill">{metrics.length} metrics</span>
-                        </h3>
-                        <div className="billing-metric-grid">
-                          {metrics.map((m, i) => (
-                            <div key={i} className="billing-metric-card">
-                              <div className="label">{m.label}</div>
-                              <div className={`value ${m.kind === 'money' ? 'money' : ''}`}>
-                                {m.kind === 'money' ? formatMoney(m.value) : formatCell(m.value)}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                        {notes.length > 0 && (
-                          <div className="billing-notes">
-                            <div className="note-heading">Notes</div>
-                            {notes.map((n, i) => <div key={i}>{n}</div>)}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  }
-
-                  if (name === 'Q1_Missing_in_CardPointe') {
-                    // Row 2 has "Count of missing enrollments: X"
-                    // Row 4 is header of overview table (4 real cols: Enrollment, Type, Refresh amount, enrollments);
-                    // rows below are data until blank. The Excel sheet's max_column is 12 (because the DETAIL
-                    // table below has 12 cols), so xlsx pads the overview rows to 12 - we slice back down.
-                    let countLabel = '';
-                    if (typeof cells[2]?.[0] === 'string') countLabel = cells[2][0] as string;
-
-                    // Overview header (drop trailing null cols added by xlsx padding)
-                    const overviewHeader = (cells[4] || []).filter(c => c !== null) as string[];
-                    const ovColCount = overviewHeader.length;
-
-                    // Overview data rows: stop when we hit a blank row or the "Details of..." label
-                    let ovEnd = 5;
-                    while (ovEnd < cells.length) {
-                      const row = cells[ovEnd];
-                      if (!row) break;
-                      const firstCell = row[0];
-                      if (firstCell === null) break;
-                      if (typeof firstCell === 'string' && firstCell.toLowerCase().startsWith('details of')) break;
-                      ovEnd++;
-                    }
-                    const overviewRows = cells.slice(5, ovEnd);
-
-                    // Detail label + table (label text comes straight from the Excel row)
-                    let detailLabelText = '';
-                    let detailHeaderIdx = -1;
-                    for (let i = ovEnd; i < cells.length; i++) {
-                      const firstCell = cells[i]?.[0];
-                      if (typeof firstCell === 'string' && firstCell.toLowerCase().includes('details of enrollments')) {
-                        detailLabelText = firstCell;
-                        detailHeaderIdx = i + 1;
-                        break;
-                      }
-                    }
-                    const detailHeader = detailHeaderIdx >= 0 ? (cells[detailHeaderIdx] || []).filter(c => c !== null) as string[] : [];
-                    const detailRows = detailHeaderIdx >= 0
-                      ? cells.slice(detailHeaderIdx + 1).filter(r => r && r.some(c => c !== null))
-                      : [];
-
-                    return (
-                      <div key={name} className="billing-section">
-                        <h3 className="billing-section-heading">
-                          Q1 · Missing in CardPointe
-                          <span className="billing-section-pill">{overviewRows.length} enrollments</span>
-                        </h3>
-                        {countLabel && <div className="billing-count-callout">{countLabel}</div>}
-                        {overviewRows.length > 0 && (
-                          <div className="billing-table-wrapper" style={{ marginBottom: 24 }}>
-                            <table className="billing-table">
-                              <thead>
-                                <tr>{overviewHeader.map((h, i) => <th key={i}>{formatCell(h)}</th>)}</tr>
-                              </thead>
-                              <tbody>
-                                {overviewRows.map((row, i) => (
-                                  <tr key={i}>
-                                    {overviewHeader.map((_, j) => (
-                                      <td key={j} className={j === 2 ? 'money' : ''}>
-                                        {j === 2 ? formatMoney(row[j]) : formatCell(row[j])}
-                                      </td>
-                                    ))}
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                        {detailRows.length > 0 && (
-                          <>
-                            <div className="billing-card-title">{detailLabelText || 'Details of enrollments missing in cardpointe'}</div>
-                            <div className="billing-table-wrapper">
-                              <table className="billing-table">
-                                <thead>
-                                  <tr>{detailHeader.map((h, i) => <th key={i}>{formatCell(h)}</th>)}</tr>
-                                </thead>
-                                <tbody>
-                                  {detailRows.map((row, i) => (
-                                    <tr key={i}>
-                                      {detailHeader.map((_, j) => (
-                                        <td key={j}>{formatCell(row[j])}</td>
-                                      ))}
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    );
-                  }
-
-                  if (name === 'Q2_Totals') {
-                    // Rows 2-9 are label/value pairs; row after that is the verdict (merged, multi-row)
-                    const pairs: { label: string; value: BillingCellValue; isHeading?: boolean }[] = [];
-                    let verdict = '';
-                    for (let i = 2; i < cells.length; i++) {
-                      const row = cells[i];
-                      if (!row) continue;
-                      const label = row[0];
-                      const value = row[1];
-                      if (typeof label !== 'string' || !label.trim()) continue;
-                      if (label.includes('CardPointe records') || label.includes('cleaner comparison')) {
-                        verdict = label;
-                        continue;
-                      }
-                      const isHeading = label.includes('For Enrollments present in both');
-                      pairs.push({ label: label.trim(), value, isHeading });
-                    }
-                    return (
-                      <div key={name} className="billing-section">
-                        <h3 className="billing-section-heading">
-                          Q2 · Totals and Difference
-                          <span className="billing-section-pill">Refresh vs CardPointe</span>
-                        </h3>
-                        <div className="billing-card">
-                          {pairs.map((p, i) => (
-                            <div key={i} style={{
-                              display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-                              padding: '8px 0', borderBottom: '1px dotted rgba(255,255,255,0.06)',
-                              fontWeight: p.isHeading ? 600 : 400,
-                              color: p.isHeading ? '#6ba4ff' : 'rgba(255,255,255,0.85)',
-                              fontSize: p.isHeading ? '13px' : '14px',
-                              textTransform: p.isHeading ? 'uppercase' as const : 'none' as const,
-                              letterSpacing: p.isHeading ? '0.1em' : 'normal',
-                              marginTop: p.isHeading ? '12px' : '0',
-                            }}>
-                              <span>{p.label}</span>
-                              {/* Heading rows have no numeric value in the Excel - don't render a value column */}
-                              {!p.isHeading && (
-                                <span style={{
-                                  fontFamily: "'JetBrains Mono', monospace",
-                                  color: typeof p.value === 'number' && p.value < 0 ? '#ff8888' : '#6ba4ff',
-                                }}>{formatMoney(p.value)}</span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                        {verdict && <div className="billing-verdict">{verdict}</div>}
-                      </div>
-                    );
-                  }
-
-                  if (name === 'Q3_Underpaid' || name === 'Q4_Overpaid_Mismatch') {
-                    const isQ4 = name === 'Q4_Overpaid_Mismatch';
-                    // Q3: title row 0, count label row 2, header row 4, data rows, TOTAL row
-                    // Q4: title row 0, warning row 2, count row 3, header row 5, data rows, TOTAL row
-                    const countRowIdx = isQ4 ? 3 : 2;
-                    const warningRowIdx = isQ4 ? 2 : -1;
-                    const headerRowIdx = isQ4 ? 5 : 4;
-                    const countLabel = typeof cells[countRowIdx]?.[0] === 'string' ? cells[countRowIdx][0] as string : '';
-                    const warning = warningRowIdx >= 0 && typeof cells[warningRowIdx]?.[0] === 'string' ? cells[warningRowIdx][0] as string : '';
-                    const header = (cells[headerRowIdx] || []).filter(c => c !== null) as string[];
-                    const dataRows: BillingCellValue[][] = [];
-                    for (let i = headerRowIdx + 1; i < cells.length; i++) {
-                      const row = cells[i];
-                      if (!row || row.every(c => c === null)) continue;
-                      // The Excel TOTAL row has "TOTAL" in column B (index 1) and SUM formulas below,
-                      // but Excel doesn't precompute the formulas so xlsx reads them as null. Skip that
-                      // row from data - we'll compute the sums ourselves.
-                      if (typeof row[1] === 'string' && String(row[1]).toUpperCase() === 'TOTAL') continue;
-                      dataRows.push(row);
-                    }
-                    // Compute totals in JavaScript for the money columns (indexes 2, 3, 4).
-                    const moneyColIndexes = [2, 3, 4];
-                    const hasTotal = dataRows.length > 0;
-                    const computedTotal: BillingCellValue[] = header.map((_, j) => {
-                      if (j === 1) return 'TOTAL';
-                      if (moneyColIndexes.includes(j)) {
-                        let sum = 0;
-                        for (const dr of dataRows) {
-                          const v = dr[j];
-                          if (typeof v === 'number') sum += v;
-                        }
-                        return sum;
-                      }
-                      return null;
-                    });
-                    return (
-                      <div key={name} className="billing-section">
-                        <h3 className="billing-section-heading">
-                          {isQ4 ? 'Q4 · Overpaid Mismatch' : 'Q3 · Underpaid'}
-                          <span className={`billing-section-pill ${isQ4 ? 'billing-section-warning-pill' : ''}`}>
-                            {dataRows.length} enrollments
-                          </span>
-                        </h3>
-                        {warning && <div className="billing-warning-banner">{warning}</div>}
-                        {countLabel && <div className="billing-count-callout">{countLabel}</div>}
-                        {dataRows.length > 0 && (
-                          <div className="billing-table-wrapper">
-                            <table className="billing-table">
-                              <thead>
-                                <tr>{header.map((h, i) => <th key={i}>{formatCell(h)}</th>)}</tr>
-                              </thead>
-                              <tbody>
-                                {dataRows.map((row, i) => (
-                                  <tr key={i}>
-                                    {header.map((_, j) => {
-                                      const isMoneyCol = moneyColIndexes.includes(j);
-                                      return (
-                                        <td key={j} className={isMoneyCol ? 'money' : ''}>
-                                          {isMoneyCol ? formatMoney(row[j]) : formatCell(row[j])}
-                                        </td>
-                                      );
-                                    })}
-                                  </tr>
-                                ))}
-                                {hasTotal && (
-                                  <tr className="total-row">
-                                    {header.map((_, j) => {
-                                      const isMoneyCol = moneyColIndexes.includes(j);
-                                      return (
-                                        <td key={j} className={isMoneyCol ? 'money' : ''}>
-                                          {isMoneyCol ? formatMoney(computedTotal[j]) : formatCell(computedTotal[j])}
-                                        </td>
-                                      );
-                                    })}
-                                  </tr>
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  }
-
-                  if (name === 'Q5_Status_Breakdown') {
-                    // Row 2: "Top level (all payments in the CardPointe file)"
-                    // Rows 3-5: 3 top-level totals (label + value)
-                    // Row 7: "Owed breakdown by CardPointe status"
-                    // Row 8: table header
-                    // Rows below: status rows + TOTAL row
-                    const topLevels: { label: string; value: BillingCellValue }[] = [];
-                    for (let i = 3; i <= 5; i++) {
-                      const row = cells[i];
-                      if (!row) continue;
-                      const label = row[0];
-                      const value = row[1];
-                      if (typeof label === 'string' && label.trim()) {
-                        topLevels.push({ label: label.trim(), value });
-                      }
-                    }
-                    // Locate the breakdown table
-                    let breakdownHeaderIdx = -1;
-                    for (let i = 6; i < cells.length; i++) {
-                      const row = cells[i];
-                      if (row && typeof row[0] === 'string' && row[1] && typeof row[1] === 'string' && (row[1] as string).toLowerCase().includes('amount')) {
-                        breakdownHeaderIdx = i;
-                        break;
-                      }
-                    }
-                    const bHeader = breakdownHeaderIdx >= 0 ? (cells[breakdownHeaderIdx] || []).filter(c => c !== null) as string[] : [];
-                    const bData: BillingCellValue[][] = [];
-                    if (breakdownHeaderIdx >= 0) {
-                      for (let i = breakdownHeaderIdx + 1; i < cells.length; i++) {
-                        const row = cells[i];
-                        if (!row || row.every(c => c === null)) continue;
-                        // Skip the Excel TOTAL row - formulas aren't precomputed so we build our own below
-                        if (typeof row[0] === 'string' && String(row[0]).toUpperCase().startsWith('TOTAL')) continue;
-                        bData.push(row);
-                      }
-                    }
-                    // Compute totals in JavaScript. Col 0 = "TOTAL OWED" label, col 1 = amount sum, col 2 = count sum.
-                    const bTotalComputed: BillingCellValue[] = bHeader.map((_, j) => {
-                      if (j === 0) return 'TOTAL OWED';
-                      if (j === 1 || j === 2) {
-                        let sum = 0;
-                        for (const r of bData) {
-                          const v = r[j];
-                          if (typeof v === 'number') sum += v;
-                        }
-                        return sum;
-                      }
-                      return null;
-                    });
-                    const hasBTotal = bData.length > 0;
-                    return (
-                      <div key={name} className="billing-section">
-                        <h3 className="billing-section-heading">
-                          Q5 · Status Breakdown
-                          <span className="billing-section-pill">CardPointe payments</span>
-                        </h3>
-                        <div className="billing-metric-grid" style={{ marginBottom: 24 }}>
-                          {topLevels.map((tl, i) => (
-                            <div key={i} className="billing-metric-card">
-                              <div className="label">{tl.label}</div>
-                              <div className="value money">{formatMoney(tl.value)}</div>
-                            </div>
-                          ))}
-                        </div>
-                        {bHeader.length > 0 && (
-                          <>
-                            <div className="billing-card-title">Owed breakdown by status</div>
-                            <div className="billing-table-wrapper">
-                              <table className="billing-table">
-                                <thead>
-                                  <tr>{bHeader.map((h, i) => <th key={i}>{formatCell(h)}</th>)}</tr>
-                                </thead>
-                                <tbody>
-                                  {bData.map((row, i) => (
-                                    <tr key={i}>
-                                      {bHeader.map((_, j) => (
-                                        <td key={j} className={j === 1 ? 'money' : ''}>
-                                          {j === 1 ? formatMoney(row[j]) : formatCell(row[j])}
-                                        </td>
-                                      ))}
-                                    </tr>
-                                  ))}
-                                  {hasBTotal && (
-                                    <tr className="total-row">
-                                      {bHeader.map((_, j) => (
-                                        <td key={j} className={j === 1 ? 'money' : ''}>
-                                          {j === 1 ? formatMoney(bTotalComputed[j]) : formatCell(bTotalComputed[j])}
-                                        </td>
-                                      ))}
-                                    </tr>
-                                  )}
-                                </tbody>
-                              </table>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    );
-                  }
-
-                  if (name === 'Enrollment_Detail') {
-                    // Row 0: title, Row 2: header, Rows 3+: data
-                    const header = (cells[2] || []).filter(c => c !== null) as string[];
-                    const dataRows = cells.slice(3).filter(r => r && r.some(c => c !== null));
-                    // Find the "Refresh Enrollment missing in Cardpointe?" flag column and center-align it.
-                    const isCenteredCol = (h: string) => /missing in cardpointe/i.test(h);
-                    return (
-                      <div key={name} className="billing-section">
-                        <h3 className="billing-section-heading">
-                          Enrollment Detail (audit)
-                          <span className="billing-section-pill">{dataRows.length} enrollments</span>
-                        </h3>
-                        <div className="billing-table-wrapper">
-                          <table className="billing-table">
-                            <thead>
-                              <tr>{header.map((h, i) => (
-                                <th key={i} className={isCenteredCol(h) ? 'col-centered' : ''}>{formatCell(h)}</th>
-                              ))}</tr>
-                            </thead>
-                            <tbody>
-                              {dataRows.map((row, i) => (
-                                <tr key={i}>
-                                  {header.map((h, j) => {
-                                    const val = row[j];
-                                    const isMoneyCol = j === 2 || j >= 5;
-                                    const classes = [
-                                      isMoneyCol ? 'money' : '',
-                                      isCenteredCol(h) ? 'col-centered' : '',
-                                    ].filter(Boolean).join(' ');
-                                    return (
-                                      <td key={j} className={classes}>
-                                        {isMoneyCol ? formatMoney(val) : formatCell(val)}
-                                      </td>
-                                    );
-                                  })}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  // Fallback: generic table view for any unrecognized sheet
-                  return (
-                    <div key={name} className="billing-section">
-                      <h3 className="billing-section-heading">
-                        {name}
-                        <span className="billing-section-pill">{cells.length} rows</span>
-                      </h3>
-                      <div className="billing-table-wrapper">
-                        <table className="billing-table">
-                          <tbody>
-                            {cells.map((row, i) => (
-                              <tr key={i}>
-                                {(row || []).map((c, j) => <td key={j}>{formatCell(c)}</td>)}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {/* Report Updates section */}
-                <div className="report-updates-section">
-                  <h3 className="report-updates-heading">Report Updates</h3>
-                  <div className="report-updates-subheading">
-                    Post follow-ups, corrections, or attachments about this report.
-                    {updates.length > 0 && ` · ${updates.length} update${updates.length === 1 ? '' : 's'}`}
-                  </div>
-
-                  {updatesLoading && <div className="loading-state">Loading updates...</div>}
-                  {updatesError && <div className="error-state">Error: {updatesError}</div>}
-
-                  {!updatesLoading && !updatesError && (
-                    <>
-                      <div className="updates-list">
-                        {updates.length === 0 ? (
-                          <div className="empty-state" style={{ padding: 32 }}>No updates yet. Be the first to post.</div>
-                        ) : (
-                          updates.map((u) => (
-                            <div key={u.id} className="update-card">
-                              <div className="update-card-head">
-                                <span className="update-name">{u.name}</span>
-                                <span className="update-date">{formatUpdateDate(u.date)}</span>
-                              </div>
-                              <div className="update-comments">{u.comments}</div>
-                              {u.filename && u.s3Key && (
-                                <div className="update-file-row">
-                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'rgba(107,164,255,0.7)' }}>
-                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                    <polyline points="14 2 14 8 20 8" />
-                                  </svg>
-                                  <span className="update-filename">{u.filename}</span>
-                                  {u.size !== null && <span className="update-filesize">{formatFileSize(u.size)}</span>}
-                                  <button className="update-download-btn" onClick={() => downloadUpdateFile(u)}>
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                      <polyline points="7 10 12 15 17 10" />
-                                      <line x1="12" y1="15" x2="12" y2="3" />
-                                    </svg>
-                                    Download
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          ))
-                        )}
-                      </div>
-
-                      <form className="upload-form" onSubmit={submitUpdate}>
-                        <div className="upload-form-title">Post a new update</div>
-                        {uploadError && <div className="upload-error">{uploadError}</div>}
-
-                        <div className="upload-form-row">
-                          <label>Your name <span className="required">*</span></label>
-                          <input
-                            className="upload-input"
-                            type="text"
-                            value={uploadName}
-                            onChange={(e) => setUploadName(e.target.value)}
-                            placeholder="e.g. Kowshik B"
-                            disabled={uploading}
-                            maxLength={100}
-                          />
-                        </div>
-
-                        <div className="upload-form-row">
-                          <label>Comments <span className="required">*</span></label>
-                          <textarea
-                            className="upload-input"
-                            value={uploadComments}
-                            onChange={(e) => setUploadComments(e.target.value)}
-                            placeholder="What's this update about?"
-                            disabled={uploading}
-                            maxLength={2000}
-                          />
-                        </div>
-
-                        <div className="upload-form-row">
-                          <label>File <span className="optional">(optional, up to 25 MB)</span></label>
-                          <div className="upload-file-row">
-                            <input
-                              id="billing-upload-file"
-                              type="file"
-                              onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-                              disabled={uploading}
-                            />
-                            {uploadFile && (
-                              <button
-                                type="button"
-                                className="upload-clear-file-btn"
-                                onClick={() => {
-                                  setUploadFile(null);
-                                  const el = document.getElementById('billing-upload-file') as HTMLInputElement | null;
-                                  if (el) el.value = '';
-                                }}
-                              >
-                                Clear file
-                              </button>
-                            )}
-                          </div>
-                        </div>
-
-                        <button
-                          type="submit"
-                          className="upload-submit-btn"
-                          disabled={uploading || !uploadName.trim() || !uploadComments.trim()}
-                        >
-                          {uploading ? 'Posting...' : 'Post Update'}
-                        </button>
-                      </form>
-                    </>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* ==================== BILLING TEST TAB ==================== */}
-        {activeTab === 'billing-test' && (
-          <div className="billing-dashboard">
-            {billingTestLoading && <div className="loading-state">Loading file...</div>}
-            {billingTestError && <div className="error-state">Error: {billingTestError}</div>}
-            {!billingTestLoading && !billingTestError && billingTestReport && (
-              <>
-                <div className="billing-header-row">
-                  <div className="billing-title-block">
-                    <h2>Billing Test</h2>
-                    <div className="billing-subtitle">
-                      Displaying: {billingTestReport.filename || (billingTestReport.sourceFile ? billingTestReport.sourceFile.split('/').pop() : 'no file loaded')}
-                      {billingTestReport.approvedKey && (
+                      Displaying: {billingReport.filename || (billingReport.sourceFile ? billingReport.sourceFile.split('/').pop() : 'no file loaded')}
+                      {billingReport.approvedKey && (
                         <> · <span style={{ color: '#80d090', fontWeight: 600 }}>APPROVED FILE</span></>
                       )}
                     </div>
                   </div>
                 </div>
 
-                {billingTestReport.sheets.length === 0 ? (
-                  <div className="empty-state" style={{ padding: 32 }}>{billingTestReport.message || 'No sheets in this file.'}</div>
+                {billingReport.sheets.length === 0 ? (
+                  <div className="empty-state" style={{ padding: 32 }}>{billingReport.message || 'No sheets in this file.'}</div>
                 ) : (
                   <div className="bt-sheet-viewer">
                     <div className="bt-sheet-tabs">
-                      {billingTestReport.sheets.map(s => (
+                      {billingReport.sheets.map(s => (
                         <button
                           key={s.name}
-                          className={`bt-sheet-tab ${billingTestActiveSheet === s.name ? 'active' : ''}`}
-                          onClick={() => setBillingTestActiveSheet(s.name)}
+                          className={`bt-sheet-tab ${billingActiveSheet === s.name ? 'active' : ''}`}
+                          onClick={() => setBillingActiveSheet(s.name)}
                         >
                           {s.name}
                         </button>
                       ))}
                     </div>
                     {(() => {
-                      const active = billingTestReport.sheets.find(s => s.name === billingTestActiveSheet)
-                        || billingTestReport.sheets[0];
+                      const active = billingReport.sheets.find(s => s.name === billingActiveSheet)
+                        || billingReport.sheets[0];
                       if (!active) return null;
                       const cells = active.cells;
                       const columnWidths = active.columnWidths || [];
@@ -3778,7 +3093,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* APPROVAL PASSCODE MODAL - Billing Test tab, rendered at root level */}
+      {/* APPROVAL PASSCODE MODAL - Billing tab, rendered at root level */}
       {approvalModalOpen && (
         <>
           <div className="upload-modal-overlay" onClick={closeApprovalModal} />
@@ -3789,7 +3104,7 @@ export default function Dashboard() {
             </div>
             <div className="approval-modal-body">
               <p className="approval-modal-info">
-                Approving <strong>{approvalTargetFilename || 'this file'}</strong> will replace the file currently displayed at the top of the Billing Test tab.
+                Approving <strong>{approvalTargetFilename || 'this file'}</strong> will replace the file currently displayed at the top of the Billing tab.
               </p>
               <label className="approval-modal-label">Passcode</label>
               <input
