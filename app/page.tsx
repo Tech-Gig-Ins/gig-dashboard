@@ -1106,6 +1106,13 @@ export default function Dashboard() {
       }
       // Refresh upload status so the checklist updates
       await fetchConsultantUploads(consultantSelectedMonth);
+
+      // Auto-generate the report as soon as all 10 slots are filled. Every
+      // upload that pushes us to 10/10 triggers a fresh Lambda run, which
+      // overwrites any existing report for this month.
+      if (data.stillMissingCount === 0) {
+        await handleConsultantGenerate();
+      }
     } catch (e: any) {
       setConsultantOpError(e.message || 'Upload failed');
     } finally {
@@ -2102,6 +2109,8 @@ export default function Dashboard() {
         .consultant-upload-header h3 { color: #ffffff; font-family: 'Fraunces', serif; font-weight: 500; font-size: 20px; margin: 0 0 6px; }
         .consultant-upload-progress { color: rgba(255, 255, 255, 0.6); font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; }
         .consultant-warning-inline { color: #f5c86e; font-weight: 600; }
+        .consultant-overwrite-banner { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 14px; background: rgba(245, 200, 110, 0.08); border: 1px solid rgba(245, 200, 110, 0.35); border-radius: 6px; color: #f5c86e; font-size: 13px; }
+        .consultant-overwrite-icon { font-size: 16px; }
         .consultant-upload-actions { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
         .consultant-upload-hint { color: rgba(255, 255, 255, 0.4); font-size: 12px; font-style: italic; }
         .consultant-slot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
@@ -3130,17 +3139,27 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Upload panel - shows whenever a month is selected and uploads aren't complete */}
-            {consultantSelectedMonth && consultantUploads && !consultantUploads.complete && (
+            {/* Upload panel - ALWAYS visible when a month is selected.
+                Report auto-generates once all 10 slots are filled. Re-uploading
+                any file always overwrites its slot and triggers a fresh generate. */}
+            {consultantSelectedMonth && consultantUploads && (
               <div className="consultant-upload-panel">
                 <div className="consultant-upload-header">
                   <h3>Upload source files for {consultantSelectedMonth}</h3>
                   <div className="consultant-upload-progress">
                     {consultantUploads.uploadedCount} of {consultantUploads.requiredCount} required files uploaded
-                    {consultantUploads.hasExistingUpload && (
-                      <span className="consultant-warning-inline"> · re-uploading will overwrite matching slots</span>
-                    )}
+                    {' · '}
+                    <span style={{ color: 'rgba(107, 164, 255, 0.85)' }}>report auto-generates on the 10th file</span>
                   </div>
+                  {(consultantReportView?.report || consultantUploads.hasExistingUpload) && (
+                    <div className="consultant-overwrite-banner">
+                      <span className="consultant-overwrite-icon">⚠</span>
+                      <span>
+                        {consultantSelectedMonth} already has {consultantReportView?.report ? 'a generated report' : 'uploaded files'}.
+                        Uploading here will overwrite matching slots and re-run the report.
+                      </span>
+                    </div>
+                  )}
                 </div>
                 <div className="consultant-upload-actions">
                   <input
@@ -3154,9 +3173,9 @@ export default function Dashboard() {
                   <button
                     className="consultant-primary-btn"
                     onClick={() => consultantFileInputRef.current?.click()}
-                    disabled={consultantUploading}
+                    disabled={consultantUploading || consultantGenerating}
                   >
-                    {consultantUploading ? 'Uploading...' : 'Choose Files'}
+                    {consultantUploading ? 'Uploading...' : consultantGenerating ? 'Generating report...' : 'Upload Files'}
                   </button>
                   <div className="consultant-upload-hint">
                     Filenames must contain one of the required patterns (e.g. TPA_Cassena, PIOPAC, CoreChoice_Direct_T1)
@@ -3185,26 +3204,6 @@ export default function Dashboard() {
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
-
-            {/* Generate button - shows whenever all 10 uploaded. Every click
-                overwrites the report for this month in S3. */}
-            {consultantSelectedMonth && consultantUploads?.complete && (
-              <div className="consultant-generate-panel">
-                <div className="consultant-generate-msg">
-                  All 10 files uploaded for {consultantSelectedMonth}. Click Generate to run the report.
-                  {consultantReportView?.report && (
-                    <> Any existing report for this month will be overwritten.</>
-                  )}
-                </div>
-                <button
-                  className="consultant-primary-btn"
-                  onClick={handleConsultantGenerate}
-                  disabled={consultantGenerating}
-                >
-                  {consultantGenerating ? 'Generating (may take up to 30s)...' : 'Generate Report'}
-                </button>
               </div>
             )}
 
