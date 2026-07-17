@@ -172,6 +172,17 @@ function detectMonthYear(filename: string): { year: number; month: number } | nu
   return null;
 }
 
+// Fallback: detect just a month NAME in the filename (no year attached).
+// Used by groupFiles to place files like "Enroll Confidently June.xls" into
+// the right month when the year has to be inferred from the S3 upload date.
+function detectMonthNameOnly(filename: string): number | null {
+  // Standalone month name - word boundary on either side so we don't match
+  // "May" inside a random word or "Jun" as part of "junior".
+  const m = filename.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i);
+  if (!m) return null;
+  return MONTH_LOOKUP[m[1].toLowerCase()];
+}
+
 // Same strict classification logic as the backend. Returns 'unknown' if none of
 // the canonical rules match. Duplicated here so the upload modal can filter the
 // All Info files client-side (avoiding an extra S3 round-trip on modal open).
@@ -343,11 +354,22 @@ function groupFiles(files: FileRow[]): DoubleGrouped {
       year = detected.year;
       month = detected.month;
     } else {
-      // Fall back to the S3 upload date so files without a detectable date in
-      // the filename still land in the correct month block alongside dated files.
-      const d = new Date(file.lastModified);
-      year = d.getFullYear();
-      month = d.getMonth();
+      const uploadDate = new Date(file.lastModified);
+      const monthOnly = detectMonthNameOnly(file.filename);
+      if (monthOnly !== null) {
+        // Filename mentions a month name but no year (e.g. "Enroll Confidently June.xls").
+        // Infer the year from the upload date: usually the current year, but if the
+        // detected month is later than the upload month, roll back a year (a "December"
+        // file uploaded in February belongs to the previous December).
+        month = monthOnly;
+        year = uploadDate.getFullYear();
+        if (month > uploadDate.getMonth()) year -= 1;
+      } else {
+        // Fall back to the S3 upload date so files with no date info still land in
+        // some month block alongside dated files.
+        year = uploadDate.getFullYear();
+        month = uploadDate.getMonth();
+      }
     }
     const label = monthLabel(year, month);
     const mKey = monthKey(year, month);
@@ -477,6 +499,63 @@ export default function Dashboard() {
   const emptyConsultantFilter: ConsultantFilterState = { consultant: '', group: '' };
   const [draftConsultantFilters, setDraftConsultantFilters] = useState<ConsultantFilterState>(emptyConsultantFilter);
   const [appliedConsultantFilters, setAppliedConsultantFilters] = useState<ConsultantFilterState>(emptyConsultantFilter);
+
+  // === NEW Consultant tab state (Lambda-driven report) ===
+  // Same 10 required source-file slots the Python Lambda expects. Order = display order.
+  const CONSULTANT_REQUIRED_SLOTS: Array<[string, string]> = [
+    ['TPA_Cassena',           'Cassena (TPA)'],
+    ['TPA_Northstead',        'Northstead (TPA)'],
+    ['TPA_GWU3',              'GWU3 (TPA)'],
+    ['TPA_GIG',               'GIG TPA.com'],
+    ['TPA_BDSB',              'BDSB (TPA)'],
+    ['426_EP6',               'EP6IX (426)'],
+    ['PIOPAC',                'PIOPAC'],
+    ['CoreChoice_Direct_T1',  'Decisely GWU2 (CoreChoice T1)'],
+    ['CoreChoice_Direct_T3',  'Decisely GWU1 (CoreChoice T3)'],
+    ['Gig_Workers',           'Refresh (Gig Workers)'],
+  ];
+  type ConsultantMonth = { prefix: string; label: string; hasReport: boolean; hasDirectory: boolean; complete: boolean; generatedAt: string | null };
+  type ConsultantSlot = { slot: string; label: string; uploaded: boolean; filename: string | null; s3Key: string | null; size: number | null; lastModified: string | null };
+  type ConsultantUploadStatus = {
+    month: string; monthPrefix: string;
+    slots: ConsultantSlot[];
+    uploadedCount: number; requiredCount: number; complete: boolean;
+    hasExistingUpload: boolean; totalFilesInPrefix: number;
+  };
+  type ConsultantSheetCell = {
+    v: string;
+    bg?: string; fg?: string; b?: boolean; i?: boolean;
+    a?: 'left' | 'center' | 'right';
+    bl?: string; br?: string; bt?: string; bb?: string;
+    rs?: number; cs?: number; hidden?: boolean;
+  };
+  type ConsultantSheet = { name: string; cells: ConsultantSheetCell[][]; columnWidths: number[] };
+  type ConsultantFileView = { s3Key: string; filename: string; lastModified: string | null; sheets: ConsultantSheet[] };
+  type ConsultantReportResp = {
+    month: string; monthPrefix: string;
+    report: ConsultantFileView | null;
+    directory: ConsultantFileView | null;
+    message?: string;
+  };
+
+  const [consultantSelectedMonth, setConsultantSelectedMonth] = useState<string>('');
+  const [consultantMonthsList, setConsultantMonthsList] = useState<ConsultantMonth[]>([]);
+  const [consultantMonthsLoading, setConsultantMonthsLoading] = useState(false);
+  const [consultantUploads, setConsultantUploads] = useState<ConsultantUploadStatus | null>(null);
+  const [consultantUploadsLoading, setConsultantUploadsLoading] = useState(false);
+  const [consultantReportView, setConsultantReportView] = useState<ConsultantReportResp | null>(null);
+  const [consultantReportLoading, setConsultantReportLoading] = useState(false);
+  const [consultantGenerating, setConsultantGenerating] = useState(false);
+  const [consultantUploading, setConsultantUploading] = useState(false);
+  const [consultantOpError, setConsultantOpError] = useState<string>('');
+  const [consultantActiveReportSheet, setConsultantActiveReportSheet] = useState<string>('');
+  const [consultantActiveDirectorySheet, setConsultantActiveDirectorySheet] = useState<string>('');
+  const [showNewMonthDialog, setShowNewMonthDialog] = useState(false);
+  const [newMonthDraft, setNewMonthDraft] = useState<{ monthIdx: number; year: number }>({
+    monthIdx: new Date().getMonth(),
+    year: new Date().getFullYear(),
+  });
+  const consultantFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Billing tab state
   // Rich sheet data with formatting - used by Billing tab.
@@ -935,6 +1014,138 @@ export default function Dashboard() {
     setConsultantFilterOpen(true);
   }
 
+  // ==================== NEW CONSULTANT TAB (Lambda) ====================
+  const MONTH_NAMES_LONG = ['January','February','March','April','May','June',
+                            'July','August','September','October','November','December'];
+
+  // Fetch the list of months that have a generated report/directory in S3.
+  // Called on tab open and after generate finishes so the selector stays fresh.
+  async function fetchConsultantMonths() {
+    setConsultantMonthsLoading(true);
+    try {
+      const res = await fetch('/api/consultant/months');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load months');
+      const months: ConsultantMonth[] = data.months || [];
+      setConsultantMonthsList(months);
+      // If nothing is selected yet and we have months, pick the newest
+      if (!consultantSelectedMonth && months.length > 0) {
+        setConsultantSelectedMonth(months[0].label);
+      }
+      return months;
+    } catch (e: any) {
+      setConsultantOpError(e.message || 'Failed to load months');
+      return [];
+    } finally {
+      setConsultantMonthsLoading(false);
+    }
+  }
+
+  // Fetch which of the 10 required slots are filled for the given month.
+  async function fetchConsultantUploads(month: string) {
+    if (!month) return;
+    setConsultantUploadsLoading(true);
+    try {
+      const res = await fetch(`/api/consultant/check-uploads?month=${encodeURIComponent(month)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to check uploads');
+      setConsultantUploads(data);
+    } catch (e: any) {
+      setConsultantOpError(e.message || 'Failed to check uploads');
+      setConsultantUploads(null);
+    } finally {
+      setConsultantUploadsLoading(false);
+    }
+  }
+
+  // Fetch the generated report + directory for the given month.
+  async function fetchConsultantReport(month: string) {
+    if (!month) return;
+    setConsultantReportLoading(true);
+    try {
+      const res = await fetch(`/api/consultant/report?month=${encodeURIComponent(month)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load report');
+      setConsultantReportView(data);
+      // Default active sheet to first sheet of each viewer
+      if (data.report?.sheets?.length > 0) setConsultantActiveReportSheet(data.report.sheets[0].name);
+      if (data.directory?.sheets?.length > 0) setConsultantActiveDirectorySheet(data.directory.sheets[0].name);
+    } catch (e: any) {
+      setConsultantOpError(e.message || 'Failed to load report');
+      setConsultantReportView(null);
+    } finally {
+      setConsultantReportLoading(false);
+    }
+  }
+
+  // Upload one or more files for the current selected month. Server validates
+  // each filename against the 10 required patterns and rejects unmatched files.
+  async function handleConsultantUpload(files: FileList | File[]) {
+    if (!consultantSelectedMonth) {
+      setConsultantOpError('Pick or add a month first.');
+      return;
+    }
+    const arr = Array.from(files);
+    if (arr.length === 0) return;
+    setConsultantUploading(true);
+    setConsultantOpError('');
+    try {
+      const form = new FormData();
+      form.set('month', consultantSelectedMonth);
+      for (const f of arr) form.append('files', f);
+      const res = await fetch('/api/consultant/upload', { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Upload failed');
+      // Report rejections to the user if any
+      const rejected = (data.results || []).filter((r: any) => r.status === 'rejected');
+      if (rejected.length > 0) {
+        setConsultantOpError(
+          `Rejected ${rejected.length} file(s) that didn't match any required slot: ` +
+          rejected.map((r: any) => r.filename).join(', ')
+        );
+      }
+      // Refresh upload status so the checklist updates
+      await fetchConsultantUploads(consultantSelectedMonth);
+    } catch (e: any) {
+      setConsultantOpError(e.message || 'Upload failed');
+    } finally {
+      setConsultantUploading(false);
+      if (consultantFileInputRef.current) consultantFileInputRef.current.value = '';
+    }
+  }
+
+  // Invoke the Lambda for the selected month. Auto-derives prev_month.
+  async function handleConsultantGenerate() {
+    if (!consultantSelectedMonth) return;
+    setConsultantGenerating(true);
+    setConsultantOpError('');
+    try {
+      const res = await fetch('/api/consultant/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ curr_month: consultantSelectedMonth }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Report generation failed');
+      // Refresh months + report
+      await fetchConsultantMonths();
+      await fetchConsultantReport(consultantSelectedMonth);
+    } catch (e: any) {
+      setConsultantOpError(e.message || 'Report generation failed');
+    } finally {
+      setConsultantGenerating(false);
+    }
+  }
+
+  // Create a new month entry from the "Add month" dialog.
+  function confirmNewMonth() {
+    const label = `${MONTH_NAMES_LONG[newMonthDraft.monthIdx]} ${newMonthDraft.year}`;
+    setConsultantSelectedMonth(label);
+    setShowNewMonthDialog(false);
+    // check-uploads for a brand-new month returns 0/10 uploaded; report returns null
+    setConsultantReportView(null);
+  }
+
   function countActiveConsultantFilters(f: ConsultantFilterState): number {
     let c = 0;
     if (f.consultant) c++;
@@ -996,6 +1207,22 @@ export default function Dashboard() {
         setBillingLoading(false);
       });
   }, [activeTab, billingRefetchTick]);
+
+  // Load consultant tab data whenever the tab is activated or the month changes.
+  useEffect(() => {
+    if (activeTab !== 'consultant') return;
+    // Always refresh the list of months when the tab becomes active
+    fetchConsultantMonths();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== 'consultant') return;
+    if (!consultantSelectedMonth) return;
+    fetchConsultantUploads(consultantSelectedMonth);
+    fetchConsultantReport(consultantSelectedMonth);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, consultantSelectedMonth]);
 
   // ==================== APPROVAL FLOW ====================
   function openApprovalModal(u: BillingUpdate) {
@@ -1845,6 +2072,70 @@ export default function Dashboard() {
         .billing-title-block .billing-subtitle { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); }
         .billing-download-btn { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.4); padding: 10px 20px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; display: inline-flex; align-items: center; }
         .billing-download-btn:hover { background: rgba(107, 164, 255, 0.28); border-color: rgba(107, 164, 255, 0.7); }
+
+        /* ==================== CONSULTANT TAB (Lambda-driven) ==================== */
+        .consultant-dashboard { padding: 32px 40px; max-width: 1600px; margin: 0 auto; }
+        .consultant-header-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 24px; flex-wrap: wrap; }
+        .consultant-title-block h2 { font-family: 'Fraunces', serif; font-size: 32px; font-weight: 500; color: #ffffff; margin: 0 0 6px; letter-spacing: -0.02em; }
+        .consultant-title-block .consultant-subtitle { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); }
+        .consultant-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .consultant-month-select { background: rgba(255, 255, 255, 0.05); color: #ffffff; border: 1px solid rgba(255, 255, 255, 0.15); padding: 9px 14px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 13px; cursor: pointer; min-width: 200px; }
+        .consultant-month-select:focus { outline: none; border-color: rgba(107, 164, 255, 0.6); }
+        .consultant-new-month-btn { background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.85); border: 1px solid rgba(255, 255, 255, 0.15); padding: 9px 16px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; }
+        .consultant-new-month-btn:hover { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.3); }
+
+        .consultant-error { background: rgba(255, 100, 140, 0.1); border: 1px solid rgba(255, 100, 140, 0.4); color: #ff9db4; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+        .consultant-error-dismiss { background: none; border: none; color: #ff9db4; font-size: 12px; cursor: pointer; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; }
+
+        .consultant-empty-state { padding: 60px 32px; text-align: center; background: rgba(255, 255, 255, 0.02); border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 12px; }
+        .consultant-empty-state h3 { color: #ffffff; font-family: 'Fraunces', serif; font-weight: 500; font-size: 22px; margin: 0 0 8px; }
+        .consultant-empty-state p { color: rgba(255, 255, 255, 0.6); margin: 0 0 20px; }
+
+        .consultant-primary-btn { background: rgba(107, 164, 255, 0.2); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.5); padding: 10px 22px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 700; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; }
+        .consultant-primary-btn:hover:not(:disabled) { background: rgba(107, 164, 255, 0.32); border-color: rgba(107, 164, 255, 0.8); }
+        .consultant-primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .consultant-secondary-btn { background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.85); border: 1px solid rgba(255, 255, 255, 0.15); padding: 10px 22px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; }
+        .consultant-secondary-btn:hover { background: rgba(255, 255, 255, 0.1); }
+
+        .consultant-upload-panel { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 24px; margin-bottom: 24px; }
+        .consultant-upload-header { margin-bottom: 20px; }
+        .consultant-upload-header h3 { color: #ffffff; font-family: 'Fraunces', serif; font-weight: 500; font-size: 20px; margin: 0 0 6px; }
+        .consultant-upload-progress { color: rgba(255, 255, 255, 0.6); font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; }
+        .consultant-warning-inline { color: #f5c86e; font-weight: 600; }
+        .consultant-upload-actions { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+        .consultant-upload-hint { color: rgba(255, 255, 255, 0.4); font-size: 12px; font-style: italic; }
+        .consultant-slot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+        .consultant-slot { display: flex; gap: 12px; padding: 12px 14px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.02); }
+        .consultant-slot.filled { border-color: rgba(80, 200, 120, 0.35); background: rgba(80, 200, 120, 0.06); }
+        .consultant-slot.empty { border-color: rgba(255, 100, 140, 0.25); background: rgba(255, 100, 140, 0.04); }
+        .consultant-slot-status { flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; }
+        .consultant-slot.filled .consultant-slot-status { background: rgba(80, 200, 120, 0.25); color: #80d090; }
+        .consultant-slot.empty .consultant-slot-status { background: rgba(255, 100, 140, 0.2); color: #ff9db4; }
+        .consultant-slot-body { flex: 1; min-width: 0; }
+        .consultant-slot-label { color: #ffffff; font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+        .consultant-slot-substring { color: rgba(255, 255, 255, 0.5); font-size: 11px; }
+        .consultant-slot-substring code { background: rgba(107, 164, 255, 0.1); color: #6ba4ff; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+        .consultant-slot-filename { color: rgba(255, 255, 255, 0.75); font-size: 11px; margin-top: 4px; font-family: 'JetBrains Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        .consultant-generate-panel { display: flex; justify-content: space-between; align-items: center; gap: 20px; background: rgba(107, 164, 255, 0.05); border: 1px solid rgba(107, 164, 255, 0.2); border-radius: 12px; padding: 20px 24px; margin-bottom: 24px; flex-wrap: wrap; }
+        .consultant-generate-msg { color: rgba(255, 255, 255, 0.75); font-size: 13px; flex: 1; }
+
+        .consultant-viewer-block { margin-bottom: 32px; }
+        .consultant-viewer-header { margin-bottom: 12px; }
+        .consultant-viewer-header h3 { color: #ffffff; font-family: 'Fraunces', serif; font-weight: 500; font-size: 20px; margin: 0 0 4px; }
+        .consultant-viewer-sub { color: rgba(255, 255, 255, 0.5); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
+
+        .consultant-modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 200; }
+        .consultant-modal { background: #0a1a3e; border: 1px solid rgba(107, 164, 255, 0.3); border-radius: 12px; padding: 28px 32px; max-width: 480px; width: 90%; }
+        .consultant-modal h3 { color: #ffffff; font-family: 'Fraunces', serif; margin: 0 0 8px; font-size: 22px; font-weight: 500; }
+        .consultant-modal p { color: rgba(255, 255, 255, 0.65); font-size: 13px; margin: 0 0 20px; }
+        .consultant-modal p code { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+        .consultant-modal-row { display: flex; gap: 12px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+        .consultant-modal-row label { color: rgba(255, 255, 255, 0.7); font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; }
+        .consultant-modal-row select, .consultant-modal-row input { background: rgba(255, 255, 255, 0.05); color: #ffffff; border: 1px solid rgba(255, 255, 255, 0.15); padding: 8px 12px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 13px; }
+        .consultant-modal-row select:focus, .consultant-modal-row input:focus { outline: none; border-color: rgba(107, 164, 255, 0.6); }
+        .consultant-modal-row input[type='number'] { width: 100px; }
+        .consultant-modal-actions { display: flex; gap: 12px; justify-content: flex-end; }
         .billing-section { margin-bottom: 48px; }
         .billing-section-heading { font-family: 'Fraunces', serif; font-size: 24px; font-weight: 500; color: #ffffff; margin: 0 0 18px; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 16px; }
         .billing-section-heading::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(107, 164, 255, 0.4) 0%, transparent 100%); }
@@ -2751,171 +3042,365 @@ export default function Dashboard() {
           </>
         )}
 
-        {/* CONSULTANT REPORT TAB */}
+        {/* ==================== CONSULTANT REPORT TAB ==================== */}
         {activeTab === 'consultant' && (
-          <>
-            <div className="search-bar">
-              <div className="search-wrapper">
-                <svg className="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="11" cy="11" r="8" />
-                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                </svg>
-                <input
-                  className="search-input"
-                  type="text"
-                  placeholder="Search by group name, consultant, or member..."
-                  value={consultantSearchInput}
-                  onChange={(e) => setConsultantSearchInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') triggerConsultantSearch(); }}
-                />
-                {consultantSearchInput && (
-                  <button className="search-clear" onClick={() => { setConsultantSearchInput(''); setConsultantSearch(''); }}>Clear</button>
+          <div className="consultant-dashboard">
+            {/* Header: title + month selector + actions */}
+            <div className="consultant-header-row">
+              <div className="consultant-title-block">
+                <h2>Consultant Report</h2>
+                <div className="consultant-subtitle">
+                  {consultantSelectedMonth ? (
+                    <>
+                      {consultantSelectedMonth}
+                      {consultantUploads && (
+                        <> · {consultantUploads.uploadedCount} / {consultantUploads.requiredCount} files uploaded</>
+                      )}
+                      {consultantReportView?.report && (
+                        <> · <span style={{ color: '#80d090', fontWeight: 600 }}>REPORT GENERATED</span></>
+                      )}
+                    </>
+                  ) : (
+                    <>Select or add a month to begin</>
+                  )}
+                </div>
+              </div>
+              <div className="consultant-actions">
+                {consultantMonthsList.length > 0 && (
+                  <select
+                    className="consultant-month-select"
+                    value={consultantSelectedMonth}
+                    onChange={(e) => setConsultantSelectedMonth(e.target.value)}
+                    disabled={consultantMonthsLoading}
+                  >
+                    {/* If the current selection isn't in the list yet (fresh month), keep it visible */}
+                    {consultantSelectedMonth && !consultantMonthsList.some(m => m.label === consultantSelectedMonth) && (
+                      <option value={consultantSelectedMonth}>{consultantSelectedMonth} (new)</option>
+                    )}
+                    {consultantMonthsList.map(m => (
+                      <option key={m.prefix} value={m.label}>{m.label}{m.complete ? '' : ' (incomplete)'}</option>
+                    ))}
+                  </select>
+                )}
+                <button
+                  className="consultant-new-month-btn"
+                  onClick={() => setShowNewMonthDialog(true)}
+                  title="Add a new month to upload files for"
+                >
+                  + New Month
+                </button>
+                {consultantReportView?.report && (
+                  <button
+                    className="billing-download-btn"
+                    onClick={() => {
+                      const r = consultantReportView.report!;
+                      handleDownload(r.s3Key, r.filename);
+                      if (consultantReportView.directory) {
+                        // Small delay so both downloads fire cleanly in the same user gesture window
+                        const d = consultantReportView.directory;
+                        setTimeout(() => handleDownload(d.s3Key, d.filename), 300);
+                      }
+                    }}
+                    title="Download both the report and the directory"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 8, verticalAlign: '-2px' }}>
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Download Excel
+                  </button>
                 )}
               </div>
-              <button className="search-btn" onClick={triggerConsultantSearch}>Search</button>
-              <button className="filter-btn" onClick={openConsultantFilterDrawer}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-                </svg>
-                Filters{activeConsultantFilterCount > 0 ? ` (${activeConsultantFilterCount})` : ''}
-              </button>
-              {activeConsultantFilterCount > 0 && (
-                <button className="filter-clear" onClick={clearAllConsultantFilters}>Clear all filters</button>
-              )}
-              <button className="download-excel-btn" onClick={downloadConsultantExcel} disabled={!masterData} title="Download both tables as an Excel file">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-                Download Excel
-              </button>
             </div>
 
-            <div className="consultant-dashboard">
-              <div className="consultant-meta-row">
-                Report month: {REPORT_MONTH} · {UNIQUE_CONSULTANTS.length} consultants · {CONSULTANT_ROWS.length} consultant/group pairs
+            {consultantOpError && (
+              <div className="consultant-error">
+                {consultantOpError}
+                <button className="consultant-error-dismiss" onClick={() => setConsultantOpError('')}>Dismiss</button>
               </div>
-
-              {/* TOP TABLE: Active Members with Consultant column */}
-              <div className="consultant-section">
-                <h2 className="consultant-section-heading">
-                  Active Members with Consultant
-                  {masterData && (
-                    <span className="consultant-section-count">
-                      {filteredActiveWithConsultant(masterData.activeMembers).length} of {masterData.activeMembers.length}
-                    </span>
-                  )}
-                </h2>
-
-                {masterLoading && <div className="loading-state">Loading active members, this may take 10-30 seconds...</div>}
-                {masterError && <div className="error-state">Error: {masterError}</div>}
-                {!masterLoading && !masterError && masterData && (() => {
-                  const filtered = filteredActiveWithConsultant(masterData.activeMembers);
-                  if (filtered.length === 0) {
-                    return <div className="empty-state">No active members match the search or filters.</div>;
-                  }
-                  return (
-                    <div className="master-table-wrapper">
-                      <table className="master-table">
-                        <thead>
-                          <tr>{activeWithConsultantColumns.map(([key, label]) => (
-                            <th key={key} className={key === 'consultant' || key === 'memberName' || key === 'group' || key === 'planName' ? 'col-name-header' : ''}>{label}</th>
-                          ))}</tr>
-                        </thead>
-                        <tbody>
-                          {filtered.map((row, i) => (
-                            <tr key={i}>{renderActiveWithConsultantCells(row)}</tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  );
-                })()}
-              </div>
-
-              {/* BOTTOM TABLE: Consultant-Group pairs */}
-              <div className="consultant-section">
-                <h2 className="consultant-section-heading">
-                  Consultant / Group Directory
-                  <span className="consultant-section-count">
-                    {filterConsultantRows(CONSULTANT_ROWS).length} of {CONSULTANT_ROWS.length}
-                  </span>
-                </h2>
-                {(() => {
-                  const filtered = filterConsultantRows(CONSULTANT_ROWS);
-                  if (filtered.length === 0) {
-                    return <div className="empty-state">No results match the search or filters.</div>;
-                  }
-                  return (
-                    <div className="consultant-table-wrapper">
-                      <table className="consultant-table">
-                        <thead>
-                          <tr>
-                            <th>Consultant</th>
-                            <th>Group</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filtered.map((r, idx) => (
-                            <tr key={`${r.consultant}-${r.group}-${idx}`}>
-                              <td className="cell-consultant">{r.consultant}</td>
-                              <td className="cell-c-group">{r.group}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  );
-                })()}
-              </div>
-            </div>
-
-            {/* FILTER DRAWER for consultant tab */}
-            {consultantFilterOpen && (
-              <>
-                <div className="filter-overlay" onClick={() => setConsultantFilterOpen(false)} />
-                <aside className="filter-drawer">
-                  <div className="filter-drawer-header">
-                    <h3>Filter Consultants</h3>
-                    <button className="close-btn" onClick={() => setConsultantFilterOpen(false)}>Close</button>
-                  </div>
-
-                  <div className="filter-drawer-body">
-                    <div className="filter-row">
-                      <label className="filter-label">Consultant</label>
-                      <select
-                        className="filter-input"
-                        value={draftConsultantFilters.consultant}
-                        onChange={(e) => setDraftConsultantFilters({ ...draftConsultantFilters, consultant: e.target.value })}
-                      >
-                        <option value="">All consultants</option>
-                        {UNIQUE_CONSULTANTS.map(c => <option key={c} value={c}>{c}</option>)}
-                      </select>
-                      <span className="filter-hint">Applies to both tables.</span>
-                    </div>
-
-                    <div className="filter-row">
-                      <label className="filter-label">Group</label>
-                      <input
-                        className="filter-input"
-                        type="text"
-                        placeholder="Contains..."
-                        value={draftConsultantFilters.group}
-                        onChange={(e) => setDraftConsultantFilters({ ...draftConsultantFilters, group: e.target.value })}
-                      />
-                      <span className="filter-hint">Applies to both tables.</span>
-                    </div>
-                  </div>
-
-                  <div className="filter-drawer-footer">
-                    <button className="filter-reset-btn" onClick={() => setDraftConsultantFilters(emptyConsultantFilter)}>Reset</button>
-                    <button className="filter-apply-btn" onClick={applyConsultantFilters}>Apply Filters</button>
-                  </div>
-                </aside>
-              </>
             )}
-          </>
+
+            {/* No month selected yet */}
+            {!consultantSelectedMonth && !consultantMonthsLoading && (
+              <div className="consultant-empty-state">
+                <h3>No reports yet</h3>
+                <p>Add a month to start uploading source files and generate the first report.</p>
+                <button className="consultant-primary-btn" onClick={() => setShowNewMonthDialog(true)}>+ Add Month</button>
+              </div>
+            )}
+
+            {/* Upload panel - shows whenever a month is selected and uploads aren't complete */}
+            {consultantSelectedMonth && consultantUploads && !consultantUploads.complete && (
+              <div className="consultant-upload-panel">
+                <div className="consultant-upload-header">
+                  <h3>Upload source files for {consultantSelectedMonth}</h3>
+                  <div className="consultant-upload-progress">
+                    {consultantUploads.uploadedCount} of {consultantUploads.requiredCount} required files uploaded
+                    {consultantUploads.hasExistingUpload && (
+                      <span className="consultant-warning-inline"> · re-uploading will overwrite matching slots</span>
+                    )}
+                  </div>
+                </div>
+                <div className="consultant-upload-actions">
+                  <input
+                    ref={consultantFileInputRef}
+                    type="file"
+                    multiple
+                    style={{ display: 'none' }}
+                    accept=".xlsx,.xls,.csv"
+                    onChange={(e) => { if (e.target.files) handleConsultantUpload(e.target.files); }}
+                  />
+                  <button
+                    className="consultant-primary-btn"
+                    onClick={() => consultantFileInputRef.current?.click()}
+                    disabled={consultantUploading}
+                  >
+                    {consultantUploading ? 'Uploading...' : 'Choose Files'}
+                  </button>
+                  <div className="consultant-upload-hint">
+                    Filenames must contain one of the required patterns (e.g. TPA_Cassena, PIOPAC, CoreChoice_Direct_T1)
+                  </div>
+                </div>
+
+                <div className="consultant-slot-grid">
+                  {consultantUploads.slots.map(s => (
+                    <div key={s.slot} className={`consultant-slot ${s.uploaded ? 'filled' : 'empty'}`}>
+                      <div className="consultant-slot-status">
+                        {s.uploaded ? (
+                          <span className="consultant-slot-check">✓</span>
+                        ) : (
+                          <span className="consultant-slot-x">—</span>
+                        )}
+                      </div>
+                      <div className="consultant-slot-body">
+                        <div className="consultant-slot-label">{s.label}</div>
+                        <div className="consultant-slot-substring">Match: <code>{s.slot}</code></div>
+                        {s.uploaded && (
+                          <div className="consultant-slot-filename" title={s.filename || ''}>
+                            {s.filename}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Generate button - shows when all 10 uploaded but no report OR to regenerate */}
+            {consultantSelectedMonth && consultantUploads?.complete && (
+              <div className="consultant-generate-panel">
+                <div className="consultant-generate-msg">
+                  {consultantReportView?.report ? (
+                    <>All 10 files uploaded. Report already generated on {consultantReportView.report.lastModified ? new Date(consultantReportView.report.lastModified).toLocaleString() : 'unknown'}. Re-generate if you replaced any files.</>
+                  ) : (
+                    <>All 10 files uploaded. Click Generate to run the report.</>
+                  )}
+                </div>
+                <button
+                  className="consultant-primary-btn"
+                  onClick={handleConsultantGenerate}
+                  disabled={consultantGenerating}
+                >
+                  {consultantGenerating ? 'Generating (may take up to 30s)...' : (consultantReportView?.report ? 'Regenerate Report' : 'Generate Report')}
+                </button>
+              </div>
+            )}
+
+            {/* Loading spinner while report loads */}
+            {consultantReportLoading && (
+              <div className="loading-state">Loading report...</div>
+            )}
+
+            {/* Report viewer */}
+            {consultantReportView?.report && (
+              <div className="consultant-viewer-block">
+                <div className="consultant-viewer-header">
+                  <h3>Consultant Report</h3>
+                  <div className="consultant-viewer-sub">
+                    {consultantReportView.report.filename}
+                    {consultantReportView.report.lastModified && (
+                      <> · updated {new Date(consultantReportView.report.lastModified).toLocaleString()}</>
+                    )}
+                  </div>
+                </div>
+                {consultantReportView.report.sheets.length === 0 ? (
+                  <div className="empty-state" style={{ padding: 24 }}>No sheets in the report file.</div>
+                ) : (
+                  <div className="bt-sheet-viewer">
+                    <div className="bt-sheet-tabs">
+                      {consultantReportView.report.sheets.map(s => (
+                        <button
+                          key={s.name}
+                          className={`bt-sheet-tab ${consultantActiveReportSheet === s.name ? 'active' : ''}`}
+                          onClick={() => setConsultantActiveReportSheet(s.name)}
+                        >
+                          {s.name}
+                        </button>
+                      ))}
+                    </div>
+                    {(() => {
+                      const active = consultantReportView.report!.sheets.find(s => s.name === consultantActiveReportSheet)
+                        || consultantReportView.report!.sheets[0];
+                      if (!active) return null;
+                      const cells = active.cells;
+                      const columnWidths = active.columnWidths || [];
+                      const maxCols = cells.reduce((m, r) => Math.max(m, r.length), 0);
+                      return (
+                        <div className="bt-sheet-scroll">
+                          <table className="bt-sheet-table" style={{ tableLayout: 'fixed' }}>
+                            <colgroup>
+                              {Array.from({ length: maxCols }).map((_, i) => (
+                                <col key={i} style={{ width: `${columnWidths[i] || 96}px` }} />
+                              ))}
+                            </colgroup>
+                            <tbody>
+                              {cells.map((row, ri) => (
+                                <tr key={ri}>
+                                  {row.map((cell, ci) => {
+                                    if (cell.hidden) return null;
+                                    const style: React.CSSProperties = {};
+                                    if (cell.bg) style.backgroundColor = cell.bg;
+                                    if (cell.fg) style.color = cell.fg;
+                                    if (cell.b) style.fontWeight = 700;
+                                    if (cell.i) style.fontStyle = 'italic';
+                                    if (cell.a) style.textAlign = cell.a;
+                                    if (cell.bl) style.borderLeft = cell.bl;
+                                    if (cell.br) style.borderRight = cell.br;
+                                    if (cell.bt) style.borderTop = cell.bt;
+                                    if (cell.bb) style.borderBottom = cell.bb;
+                                    return (
+                                      <td
+                                        key={ci}
+                                        style={style}
+                                        rowSpan={cell.rs}
+                                        colSpan={cell.cs}
+                                      >
+                                        {cell.v}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Directory viewer */}
+            {consultantReportView?.directory && (
+              <div className="consultant-viewer-block">
+                <div className="consultant-viewer-header">
+                  <h3>Consultant Directory</h3>
+                  <div className="consultant-viewer-sub">
+                    {consultantReportView.directory.filename}
+                    {consultantReportView.directory.lastModified && (
+                      <> · updated {new Date(consultantReportView.directory.lastModified).toLocaleString()}</>
+                    )}
+                  </div>
+                </div>
+                {consultantReportView.directory.sheets.length === 0 ? (
+                  <div className="empty-state" style={{ padding: 24 }}>No sheets in the directory file.</div>
+                ) : (
+                  <div className="bt-sheet-viewer">
+                    <div className="bt-sheet-tabs">
+                      {consultantReportView.directory.sheets.map(s => (
+                        <button
+                          key={s.name}
+                          className={`bt-sheet-tab ${consultantActiveDirectorySheet === s.name ? 'active' : ''}`}
+                          onClick={() => setConsultantActiveDirectorySheet(s.name)}
+                        >
+                          {s.name}
+                        </button>
+                      ))}
+                    </div>
+                    {(() => {
+                      const active = consultantReportView.directory!.sheets.find(s => s.name === consultantActiveDirectorySheet)
+                        || consultantReportView.directory!.sheets[0];
+                      if (!active) return null;
+                      const cells = active.cells;
+                      const columnWidths = active.columnWidths || [];
+                      const maxCols = cells.reduce((m, r) => Math.max(m, r.length), 0);
+                      return (
+                        <div className="bt-sheet-scroll">
+                          <table className="bt-sheet-table" style={{ tableLayout: 'fixed' }}>
+                            <colgroup>
+                              {Array.from({ length: maxCols }).map((_, i) => (
+                                <col key={i} style={{ width: `${columnWidths[i] || 96}px` }} />
+                              ))}
+                            </colgroup>
+                            <tbody>
+                              {cells.map((row, ri) => (
+                                <tr key={ri}>
+                                  {row.map((cell, ci) => {
+                                    if (cell.hidden) return null;
+                                    const style: React.CSSProperties = {};
+                                    if (cell.bg) style.backgroundColor = cell.bg;
+                                    if (cell.fg) style.color = cell.fg;
+                                    if (cell.b) style.fontWeight = 700;
+                                    if (cell.i) style.fontStyle = 'italic';
+                                    if (cell.a) style.textAlign = cell.a;
+                                    if (cell.bl) style.borderLeft = cell.bl;
+                                    if (cell.br) style.borderRight = cell.br;
+                                    if (cell.bt) style.borderTop = cell.bt;
+                                    if (cell.bb) style.borderBottom = cell.bb;
+                                    return (
+                                      <td key={ci} style={style} rowSpan={cell.rs} colSpan={cell.cs}>
+                                        {cell.v}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* New Month dialog */}
+            {showNewMonthDialog && (
+              <div className="consultant-modal-overlay" onClick={() => setShowNewMonthDialog(false)}>
+                <div className="consultant-modal" onClick={(e) => e.stopPropagation()}>
+                  <h3>Add a New Month</h3>
+                  <p>Pick the month you're uploading source files for. Files will be stored at <code>consultant-inputs/YYYY-MM/</code>.</p>
+                  <div className="consultant-modal-row">
+                    <label>Month</label>
+                    <select
+                      value={newMonthDraft.monthIdx}
+                      onChange={(e) => setNewMonthDraft(d => ({ ...d, monthIdx: parseInt(e.target.value, 10) }))}
+                    >
+                      {MONTH_NAMES_LONG.map((n, i) => (
+                        <option key={i} value={i}>{n}</option>
+                      ))}
+                    </select>
+                    <label>Year</label>
+                    <input
+                      type="number"
+                      min={2020}
+                      max={2099}
+                      value={newMonthDraft.year}
+                      onChange={(e) => setNewMonthDraft(d => ({ ...d, year: parseInt(e.target.value, 10) || d.year }))}
+                    />
+                  </div>
+                  <div className="consultant-modal-actions">
+                    <button className="consultant-secondary-btn" onClick={() => setShowNewMonthDialog(false)}>Cancel</button>
+                    <button className="consultant-primary-btn" onClick={confirmNewMonth}>Add Month</button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         )}
 
         {/* ==================== BILLING TAB ==================== */}
