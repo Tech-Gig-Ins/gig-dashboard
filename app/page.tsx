@@ -3188,14 +3188,14 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Generate button - shows when all 10 uploaded but no report OR to regenerate */}
+            {/* Generate button - shows whenever all 10 uploaded. Every click
+                overwrites the report for this month in S3. */}
             {consultantSelectedMonth && consultantUploads?.complete && (
               <div className="consultant-generate-panel">
                 <div className="consultant-generate-msg">
-                  {consultantReportView?.report ? (
-                    <>All 10 files uploaded. Report already generated on {consultantReportView.report.lastModified ? new Date(consultantReportView.report.lastModified).toLocaleString() : 'unknown'}. Re-generate if you replaced any files.</>
-                  ) : (
-                    <>All 10 files uploaded. Click Generate to run the report.</>
+                  All 10 files uploaded for {consultantSelectedMonth}. Click Generate to run the report.
+                  {consultantReportView?.report && (
+                    <> Any existing report for this month will be overwritten.</>
                   )}
                 </div>
                 <button
@@ -3203,7 +3203,7 @@ export default function Dashboard() {
                   onClick={handleConsultantGenerate}
                   disabled={consultantGenerating}
                 >
-                  {consultantGenerating ? 'Generating (may take up to 30s)...' : (consultantReportView?.report ? 'Regenerate Report' : 'Generate Report')}
+                  {consultantGenerating ? 'Generating (may take up to 30s)...' : 'Generate Report'}
                 </button>
               </div>
             )}
