@@ -612,15 +612,24 @@ export default function Dashboard() {
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
 
   // === Per-month billing state ===
-  type BillingMonth = { prefix: string; label: string; hasReport: boolean; hasChat: boolean; lastActivity: string | null };
-  const [billingSelectedMonth, setBillingSelectedMonth] = useState<string>('July 2026');
-  const [billingMonthsList, setBillingMonthsList] = useState<BillingMonth[]>([]);
-  const [billingMonthsLoading, setBillingMonthsLoading] = useState(false);
-  const [showBillingNewMonthDialog, setShowBillingNewMonthDialog] = useState(false);
-  const [newBillingMonthDraft, setNewBillingMonthDraft] = useState<{ monthIdx: number; year: number }>({
-    monthIdx: new Date().getMonth(),
-    year: new Date().getFullYear(),
+  const [billingSelectedMonth, setBillingSelectedMonth] = useState<string>(() => {
+    // Default to current month
+    const d = new Date();
+    const monthNames = ['January','February','March','April','May','June',
+                        'July','August','September','October','November','December'];
+    return `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
   });
+  // Month-selector state (fixed 12 months per year with a year navigator).
+  // The dropdown intentionally lists all months regardless of what's in S3.
+  const [billingSelectedMonthIdx, setBillingSelectedMonthIdx] = useState<number>(new Date().getMonth());
+  const [billingSelectedYear, setBillingSelectedYear] = useState<number>(new Date().getFullYear());
+
+  // Source-file upload modal state (CardConnect + Refresh)
+  const [showBillingUploadModal, setShowBillingUploadModal] = useState(false);
+  const [billingCardConnectFile, setBillingCardConnectFile] = useState<File | null>(null);
+  const [billingRefreshFile, setBillingRefreshFile] = useState<File | null>(null);
+  const [billingSourcesUploading, setBillingSourcesUploading] = useState(false);
+  const [billingSourcesError, setBillingSourcesError] = useState<string | null>(null);
 
   // Load the All Info files listing. Extracted from useEffect so we can refresh
   // it after new files are uploaded via the upload modal.
@@ -1228,16 +1237,11 @@ export default function Dashboard() {
 
   // Load the list of billing months on tab activation
   useEffect(() => {
-    if (activeTab !== 'billing') return;
-    setBillingMonthsLoading(true);
-    fetch('/api/billing/months')
-      .then(res => res.json())
-      .then((data: { months: BillingMonth[] }) => {
-        setBillingMonthsList(data.months || []);
-        setBillingMonthsLoading(false);
-      })
-      .catch(() => setBillingMonthsLoading(false));
-  }, [activeTab]);
+    // Keep the "Month Year" label string in sync with the two selectors
+    const label = `${MONTH_NAMES_LONG[billingSelectedMonthIdx]} ${billingSelectedYear}`;
+    setBillingSelectedMonth(label);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [billingSelectedMonthIdx, billingSelectedYear]);
 
   // Load consultant tab data whenever the tab is activated or the month changes.
   useEffect(() => {
@@ -1306,6 +1310,33 @@ export default function Dashboard() {
     } catch (err: any) {
       setApprovalError(err.message || 'Network error');
       setApprovalSubmitting(false);
+    }
+  }
+
+  async function submitBillingSourcesUpload() {
+    setBillingSourcesError(null);
+    if (!billingCardConnectFile && !billingRefreshFile) {
+      setBillingSourcesError('Choose at least one file');
+      return;
+    }
+    setBillingSourcesUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('month', billingSelectedMonth);
+      if (billingCardConnectFile) fd.append('cardconnect', billingCardConnectFile);
+      if (billingRefreshFile)     fd.append('refresh',     billingRefreshFile);
+      const res = await fetch('/api/billing/upload-sources', { method: 'POST', body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
+      // Success - clear form + refresh billing view so the new sources are visible
+      setBillingCardConnectFile(null);
+      setBillingRefreshFile(null);
+      setShowBillingUploadModal(false);
+      setBillingRefetchTick(t => t + 1);
+    } catch (e: any) {
+      setBillingSourcesError(e.message || 'Upload failed');
+    } finally {
+      setBillingSourcesUploading(false);
     }
   }
 
@@ -2104,6 +2135,10 @@ export default function Dashboard() {
         .billing-title-block h2 { font-family: 'Fraunces', serif; font-size: 32px; font-weight: 500; color: #ffffff; margin: 0 0 6px; letter-spacing: -0.02em; }
         .billing-title-block .billing-subtitle { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); }
         .billing-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .billing-source-slot { margin-bottom: 16px; padding: 14px 16px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; }
+        .billing-source-label { color: #ffffff; font-weight: 600; font-size: 13px; margin-bottom: 8px; letter-spacing: 0.05em; }
+        .billing-source-picker { display: flex; gap: 12px; align-items: center; }
+        .billing-source-filename { color: rgba(255, 255, 255, 0.65); font-size: 12px; font-family: 'JetBrains Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
         .billing-download-btn { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.4); padding: 10px 20px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; display: inline-flex; align-items: center; }
         .billing-download-btn:hover { background: rgba(107, 164, 255, 0.28); border-color: rgba(107, 164, 255, 0.7); }
 
@@ -3449,25 +3484,40 @@ export default function Dashboard() {
                   <div className="billing-actions">
                     <select
                       className="consultant-month-select"
-                      value={billingSelectedMonth}
-                      onChange={(e) => setBillingSelectedMonth(e.target.value)}
-                      disabled={billingMonthsLoading}
-                      title="Month whose reconciliation file and chat are displayed"
+                      value={billingSelectedMonthIdx}
+                      onChange={(e) => setBillingSelectedMonthIdx(parseInt(e.target.value, 10))}
+                      title="Month"
                     >
-                      {/* If the current selection isn't in the list yet (fresh month), keep it visible */}
-                      {billingSelectedMonth && !billingMonthsList.some(m => m.label === billingSelectedMonth) && (
-                        <option value={billingSelectedMonth}>{billingSelectedMonth} (new)</option>
-                      )}
-                      {billingMonthsList.map(m => (
-                        <option key={m.prefix} value={m.label}>{m.label}</option>
+                      {MONTH_NAMES_LONG.map((n, i) => (
+                        <option key={i} value={i}>{n}</option>
                       ))}
+                    </select>
+                    <select
+                      className="consultant-month-select"
+                      value={billingSelectedYear}
+                      onChange={(e) => setBillingSelectedYear(parseInt(e.target.value, 10))}
+                      title="Year"
+                      style={{ minWidth: 110 }}
+                    >
+                      {/* Years: 3 back, current, 2 ahead. Adjust freely if needed. */}
+                      {(() => {
+                        const now = new Date().getFullYear();
+                        const opts: number[] = [];
+                        for (let y = now - 3; y <= now + 2; y++) opts.push(y);
+                        return opts.map(y => <option key={y} value={y}>{y}</option>);
+                      })()}
                     </select>
                     <button
                       className="consultant-new-month-btn"
-                      onClick={() => setShowBillingNewMonthDialog(true)}
-                      title="Add a new month to upload files or comments for"
+                      onClick={() => {
+                        setBillingCardConnectFile(null);
+                        setBillingRefreshFile(null);
+                        setBillingSourcesError(null);
+                        setShowBillingUploadModal(true);
+                      }}
+                      title="Upload CardConnect + Refresh source files for this month"
                     >
-                      + New Month
+                      Upload Files
                     </button>
                     {billingReport.sourceFile && (
                       <button
@@ -3670,42 +3720,79 @@ export default function Dashboard() {
                 </div>
               </>
             )}
-            {/* New Month dialog for Billing */}
-            {showBillingNewMonthDialog && (
-              <div className="consultant-modal-overlay" onClick={() => setShowBillingNewMonthDialog(false)}>
-                <div className="consultant-modal" onClick={(e) => e.stopPropagation()}>
-                  <h3>Add a New Month to Billing</h3>
-                  <p>Pick a month to display or start posting updates for. The dropdown will show it right away; a chat manifest gets created the first time you post an update.</p>
-                  <div className="consultant-modal-row">
-                    <label>Month</label>
-                    <select
-                      value={newBillingMonthDraft.monthIdx}
-                      onChange={(e) => setNewBillingMonthDraft(d => ({ ...d, monthIdx: parseInt(e.target.value, 10) }))}
-                    >
-                      {MONTH_NAMES_LONG.map((n, i) => (
-                        <option key={i} value={i}>{n}</option>
-                      ))}
-                    </select>
-                    <label>Year</label>
-                    <input
-                      type="number"
-                      min={2020}
-                      max={2099}
-                      value={newBillingMonthDraft.year}
-                      onChange={(e) => setNewBillingMonthDraft(d => ({ ...d, year: parseInt(e.target.value, 10) || d.year }))}
-                    />
+            {/* Upload Sources modal for Billing (CardConnect + Refresh) */}
+            {showBillingUploadModal && (
+              <div className="consultant-modal-overlay" onClick={() => setShowBillingUploadModal(false)}>
+                <div className="consultant-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560 }}>
+                  <h3>Upload Source Files for {billingSelectedMonth}</h3>
+                  <p>Upload the CardConnect and Refresh files for this month. Existing files for the same month will be overwritten.</p>
+
+                  {billingSourcesError && (
+                    <div className="consultant-error" style={{ marginBottom: 16 }}>
+                      {billingSourcesError}
+                    </div>
+                  )}
+
+                  <div className="billing-source-slot">
+                    <div className="billing-source-label">CardConnect</div>
+                    <div className="billing-source-picker">
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls,.csv"
+                        id="billing-src-cc"
+                        style={{ display: 'none' }}
+                        onChange={(e) => setBillingCardConnectFile(e.target.files?.[0] || null)}
+                      />
+                      <button
+                        className="consultant-secondary-btn"
+                        onClick={() => document.getElementById('billing-src-cc')?.click()}
+                        disabled={billingSourcesUploading}
+                      >
+                        {billingCardConnectFile ? 'Change File' : 'Choose File'}
+                      </button>
+                      <span className="billing-source-filename">
+                        {billingCardConnectFile ? billingCardConnectFile.name : 'No file selected'}
+                      </span>
+                    </div>
                   </div>
-                  <div className="consultant-modal-actions">
-                    <button className="consultant-secondary-btn" onClick={() => setShowBillingNewMonthDialog(false)}>Cancel</button>
+
+                  <div className="billing-source-slot">
+                    <div className="billing-source-label">Refresh</div>
+                    <div className="billing-source-picker">
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls,.csv"
+                        id="billing-src-rf"
+                        style={{ display: 'none' }}
+                        onChange={(e) => setBillingRefreshFile(e.target.files?.[0] || null)}
+                      />
+                      <button
+                        className="consultant-secondary-btn"
+                        onClick={() => document.getElementById('billing-src-rf')?.click()}
+                        disabled={billingSourcesUploading}
+                      >
+                        {billingRefreshFile ? 'Change File' : 'Choose File'}
+                      </button>
+                      <span className="billing-source-filename">
+                        {billingRefreshFile ? billingRefreshFile.name : 'No file selected'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="consultant-modal-actions" style={{ marginTop: 20 }}>
+                    <button
+                      className="consultant-secondary-btn"
+                      onClick={() => setShowBillingUploadModal(false)}
+                      disabled={billingSourcesUploading}
+                    >
+                      Cancel
+                    </button>
                     <button
                       className="consultant-primary-btn"
-                      onClick={() => {
-                        const label = `${MONTH_NAMES_LONG[newBillingMonthDraft.monthIdx]} ${newBillingMonthDraft.year}`;
-                        setBillingSelectedMonth(label);
-                        setShowBillingNewMonthDialog(false);
-                      }}
+                      onClick={submitBillingSourcesUpload}
+                      disabled={billingSourcesUploading || (!billingCardConnectFile && !billingRefreshFile)}
                     >
-                      Add Month
+                      {billingSourcesUploading ? 'Uploading...' : 'Upload'}
                     </button>
                   </div>
                 </div>
