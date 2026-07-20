@@ -95,9 +95,12 @@ export async function POST(req: NextRequest) {
     const ccFile = cardconnect instanceof File && cardconnect.size > 0 ? cardconnect : null;
     const rfFile = refresh instanceof File && refresh.size > 0 ? refresh : null;
 
-    if (!ccFile && !rfFile) {
+    if (!ccFile || !rfFile) {
+      const missing: string[] = [];
+      if (!ccFile) missing.push('cardconnect');
+      if (!rfFile) missing.push('refresh');
       return NextResponse.json(
-        { error: 'Provide at least one of: cardconnect, refresh' },
+        { error: `Both files are required. Missing: ${missing.join(', ')}` },
         { status: 400 }
       );
     }
@@ -112,16 +115,13 @@ export async function POST(req: NextRequest) {
     }
 
     const results: { slot: string; s3Key: string; filename: string; size: number }[] = [];
-    if (ccFile) {
-      await clearExistingSlot(prefix, 'cardconnect');
-      const key = await uploadSlot(prefix, 'cardconnect', ccFile);
-      results.push({ slot: 'cardconnect', s3Key: key, filename: ccFile.name, size: ccFile.size });
-    }
-    if (rfFile) {
-      await clearExistingSlot(prefix, 'refresh');
-      const key = await uploadSlot(prefix, 'refresh', rfFile);
-      results.push({ slot: 'refresh', s3Key: key, filename: rfFile.name, size: rfFile.size });
-    }
+    await clearExistingSlot(prefix, 'cardconnect');
+    const ccKey = await uploadSlot(prefix, 'cardconnect', ccFile);
+    results.push({ slot: 'cardconnect', s3Key: ccKey, filename: ccFile.name, size: ccFile.size });
+
+    await clearExistingSlot(prefix, 'refresh');
+    const rfKey = await uploadSlot(prefix, 'refresh', rfFile);
+    results.push({ slot: 'refresh', s3Key: rfKey, filename: rfFile.name, size: rfFile.size });
 
     return NextResponse.json({
       ok: true,

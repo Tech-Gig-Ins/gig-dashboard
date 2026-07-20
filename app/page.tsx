@@ -1315,16 +1315,16 @@ export default function Dashboard() {
 
   async function submitBillingSourcesUpload() {
     setBillingSourcesError(null);
-    if (!billingCardConnectFile && !billingRefreshFile) {
-      setBillingSourcesError('Choose at least one file');
+    if (!billingCardConnectFile || !billingRefreshFile) {
+      setBillingSourcesError('Both CardConnect and Refresh files are required');
       return;
     }
     setBillingSourcesUploading(true);
     try {
       const fd = new FormData();
       fd.append('month', billingSelectedMonth);
-      if (billingCardConnectFile) fd.append('cardconnect', billingCardConnectFile);
-      if (billingRefreshFile)     fd.append('refresh',     billingRefreshFile);
+      fd.append('cardconnect', billingCardConnectFile);
+      fd.append('refresh',     billingRefreshFile);
       const res = await fetch('/api/billing/upload-sources', { method: 'POST', body: fd });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
@@ -2148,8 +2148,9 @@ export default function Dashboard() {
         .consultant-title-block h2 { font-family: 'Fraunces', serif; font-size: 32px; font-weight: 500; color: #ffffff; margin: 0 0 6px; letter-spacing: -0.02em; }
         .consultant-title-block .consultant-subtitle { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); }
         .consultant-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-        .consultant-month-select { background: rgba(255, 255, 255, 0.05); color: #ffffff; border: 1px solid rgba(255, 255, 255, 0.15); padding: 9px 14px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 13px; cursor: pointer; min-width: 200px; }
+        .consultant-month-select { background: rgba(10, 26, 62, 0.9); color: #ffffff; border: 1px solid rgba(255, 255, 255, 0.15); padding: 9px 14px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 13px; cursor: pointer; min-width: 200px; }
         .consultant-month-select:focus { outline: none; border-color: rgba(107, 164, 255, 0.6); }
+        .consultant-month-select option { background: #0a1a3e; color: #ffffff; }
         .consultant-new-month-btn { background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.85); border: 1px solid rgba(255, 255, 255, 0.15); padding: 9px 16px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; }
         .consultant-new-month-btn:hover { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.3); }
 
@@ -3725,7 +3726,7 @@ export default function Dashboard() {
               <div className="consultant-modal-overlay" onClick={() => setShowBillingUploadModal(false)}>
                 <div className="consultant-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560 }}>
                   <h3>Upload Source Files for {billingSelectedMonth}</h3>
-                  <p>Upload the CardConnect and Refresh files for this month. Existing files for the same month will be overwritten.</p>
+                  <p>Both CardConnect and Refresh files are required. Existing files for this month will be overwritten.</p>
 
                   {billingSourcesError && (
                     <div className="consultant-error" style={{ marginBottom: 16 }}>
@@ -3790,7 +3791,7 @@ export default function Dashboard() {
                     <button
                       className="consultant-primary-btn"
                       onClick={submitBillingSourcesUpload}
-                      disabled={billingSourcesUploading || (!billingCardConnectFile && !billingRefreshFile)}
+                      disabled={billingSourcesUploading || !billingCardConnectFile || !billingRefreshFile}
                     >
                       {billingSourcesUploading ? 'Uploading...' : 'Upload'}
                     </button>
