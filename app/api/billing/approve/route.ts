@@ -1,22 +1,17 @@
-// Located at: app/api/billing/approve/route.ts
+// app/api/billing/approve/route.ts
 //
-// Persists the currently-approved Billing Test file to S3.
-// Body: { key: string, passcode: string }
-// Passcode must equal 'AndrewGig' (server-side check).
+// POST body: { month: "July 2026", key: "billing-updates/2026-07/files/...", passcode: "AndrewGig" }
 //
-// On success, writes s3://<bucket>/billing-updates/billing-test-approved.json
-// which is then picked up by GET /api/billing/report-file.
-//
-// To reset the display back to the default reconciliation output, delete the
-// billing-test-approved.json object via the AWS console or:
-//   aws s3 rm s3://gig-remittance-raw-prod/billing-updates/billing-test-approved.json --profile tech-admin
+// Validates the passcode server-side and, on success, writes an approved.json
+// pointer for the given month to s3://.../billing-updates/{YYYY-MM}/approved.json.
+// The next GET on /api/billing/report-file?month=<same month> will surface
+// that file as the displayed one for that month.
 
-import { NextResponse } from 'next/server';
-import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { NextRequest, NextResponse } from 'next/server';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
-const APPROVED_JSON_KEY = 'billing-updates/billing-test-approved.json';
 const REQUIRED_PASSCODE = 'AndrewGig';
 
 const s3 = new S3Client({
@@ -27,45 +22,49 @@ const s3 = new S3Client({
   },
 });
 
-export async function POST(request: Request) {
+function monthToPrefix(label: string): string | null {
+  const months = ['january','february','march','april','may','june','july',
+                  'august','september','october','november','december'];
+  const parts = label.trim().toLowerCase().split(/\s+/);
+  if (parts.length !== 2) return null;
+  const mi = months.indexOf(parts[0]);
+  const yr = parseInt(parts[1], 10);
+  if (mi < 0 || !Number.isFinite(yr) || yr < 2020 || yr > 2099) return null;
+  return `${yr}-${String(mi + 1).padStart(2, '0')}`;
+}
+
+export async function POST(req: NextRequest) {
   try {
-    const body = await request.json().catch(() => ({}));
-    const key: string | undefined = body?.key;
-    const passcode: string | undefined = body?.passcode;
+    const body = await req.json().catch(() => ({}));
+    const key = typeof body.key === 'string' ? body.key.trim() : '';
+    const passcode = typeof body.passcode === 'string' ? body.passcode : '';
+    const month = typeof body.month === 'string' ? body.month : '';
 
-    if (!key || typeof key !== 'string') {
-      return NextResponse.json({ error: 'Missing key' }, { status: 400 });
-    }
+    if (!key) return NextResponse.json({ error: 'key is required' }, { status: 400 });
     if (passcode !== REQUIRED_PASSCODE) {
-      return NextResponse.json({ error: 'Incorrect passcode' }, { status: 401 });
+      return NextResponse.json({ error: 'Incorrect passcode' }, { status: 403 });
+    }
+    const prefix = monthToPrefix(month);
+    if (!prefix) {
+      return NextResponse.json(
+        { error: `Invalid month "${month}". Expected format: "July 2026".` },
+        { status: 400 }
+      );
     }
 
-    // Verify the S3 object exists before pinning it as approved
-    try {
-      await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
-    } catch (err: any) {
-      if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) {
-        return NextResponse.json({ error: 'File not found in S3' }, { status: 404 });
-      }
-      throw err;
-    }
-
-    const payload = JSON.stringify({
-      approvedKey: key,
-      approvedAt: new Date().toISOString(),
-    }, null, 2);
-
+    const jsonKey = `billing-updates/${prefix}/approved.json`;
+    const bodyStr = JSON.stringify({ approvedKey: key, approvedAt: new Date().toISOString() }, null, 2);
     await s3.send(new PutObjectCommand({
       Bucket: BUCKET,
-      Key: APPROVED_JSON_KEY,
-      Body: payload,
+      Key: jsonKey,
+      Body: bodyStr,
       ContentType: 'application/json',
     }));
 
-    return NextResponse.json({ ok: true, approvedKey: key });
+    return NextResponse.json({ ok: true, month, monthPrefix: prefix, approvedKey: key });
   } catch (err: any) {
     console.error('approve error:', err);
-    return NextResponse.json({ error: err.message || 'Failed to save approval' }, { status: 500 });
+    return NextResponse.json({ error: err.message || 'Approval failed' }, { status: 500 });
   }
 }
 

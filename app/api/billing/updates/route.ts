@@ -1,15 +1,18 @@
 // app/api/billing/updates/route.ts
 //
-// Report Updates for the Billing tab.
+// Per-month Report Updates for the Billing tab.
 //
-// GET  -> returns the list of updates from billing-updates/manifest.json in S3.
-// POST -> accepts multipart form data: name (required), comments (required), file (optional).
-//         Uploads the file (if present) to billing-updates/files/{uuid}-{filename},
-//         appends a new entry to manifest.json.
+// GET  ?month=July%202026 -> returns updates for that month
+// POST FormData: month, name, comments, optional file
+//       -> uploads file (if any), appends entry to that month's manifest
 //
-// S3 layout:
-//   {S3_RAW_BUCKET}/billing-updates/manifest.json
-//   {S3_RAW_BUCKET}/billing-updates/files/{uuid}-{original-filename}
+// S3 layout (per-month):
+//   {S3_RAW_BUCKET}/billing-updates/{YYYY-MM}/manifest.json
+//   {S3_RAW_BUCKET}/billing-updates/{YYYY-MM}/files/{uuid}-{original-filename}
+//
+// Existing entries from the old flat layout can be migrated by copying
+//   billing-updates/manifest.json -> billing-updates/2026-07/manifest.json
+// (files/ contents can stay where they are; the s3Key strings still resolve.)
 
 import { NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
@@ -24,26 +27,40 @@ const s3 = new S3Client({
 });
 
 const BUCKET = process.env.S3_RAW_BUCKET || '';
-const MANIFEST_KEY = 'billing-updates/manifest.json';
-const FILES_PREFIX = 'billing-updates/files/';
-
-// Cap file size to avoid stuffing very large uploads through the API route.
-// 25 MB is generous for most attachments.
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
 type BillingUpdate = {
   id: string;
   name: string;
   comments: string;
-  date: string;              // ISO timestamp
-  filename: string | null;   // original filename, null if no file attached
-  s3Key: string | null;      // full S3 key, null if no file attached
-  size: number | null;       // bytes, null if no file
+  date: string;
+  filename: string | null;
+  s3Key: string | null;
+  size: number | null;
 };
 
-async function loadManifest(): Promise<BillingUpdate[]> {
+// "July 2026" -> "2026-07"
+function monthToPrefix(label: string): string | null {
+  const months = ['january','february','march','april','may','june','july',
+                  'august','september','october','november','december'];
+  const parts = label.trim().toLowerCase().split(/\s+/);
+  if (parts.length !== 2) return null;
+  const mi = months.indexOf(parts[0]);
+  const yr = parseInt(parts[1], 10);
+  if (mi < 0 || !Number.isFinite(yr) || yr < 2020 || yr > 2099) return null;
+  return `${yr}-${String(mi + 1).padStart(2, '0')}`;
+}
+
+function manifestKey(prefix: string): string {
+  return `billing-updates/${prefix}/manifest.json`;
+}
+function filesPrefix(prefix: string): string {
+  return `billing-updates/${prefix}/files/`;
+}
+
+async function loadManifest(key: string): Promise<BillingUpdate[]> {
   try {
-    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: MANIFEST_KEY }));
+    const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
     const stream = obj.Body as any;
     const chunks: Buffer[] = [];
     for await (const chunk of stream) {
@@ -55,38 +72,42 @@ async function loadManifest(): Promise<BillingUpdate[]> {
     if (!Array.isArray(parsed)) return [];
     return parsed as BillingUpdate[];
   } catch (e: any) {
-    // Manifest doesn't exist yet - return empty list
-    if (e.name === 'NoSuchKey' || e.$metadata?.httpStatusCode === 404) {
-      return [];
-    }
+    if (e.name === 'NoSuchKey' || e.$metadata?.httpStatusCode === 404) return [];
     throw e;
   }
 }
 
-async function saveManifest(updates: BillingUpdate[]): Promise<void> {
+async function saveManifest(key: string, updates: BillingUpdate[]): Promise<void> {
   const body = JSON.stringify(updates, null, 2);
   await s3.send(new PutObjectCommand({
     Bucket: BUCKET,
-    Key: MANIFEST_KEY,
+    Key: key,
     Body: body,
     ContentType: 'application/json',
   }));
 }
 
-// Sanitize filename to something safe for S3 keys (spaces + odd chars allowed but stripped of control chars)
 function safeFilename(name: string): string {
   return name.replace(/[\x00-\x1f\x7f/\\]/g, '_').slice(0, 200);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     if (!BUCKET) {
       return NextResponse.json({ error: 'S3_RAW_BUCKET not configured' }, { status: 500 });
     }
-    const updates = await loadManifest();
-    // Sort newest first
+    const { searchParams } = new URL(request.url);
+    const month = searchParams.get('month') || '';
+    const prefix = monthToPrefix(month);
+    if (!prefix) {
+      return NextResponse.json(
+        { error: `Invalid month "${month}". Expected format: "July 2026".` },
+        { status: 400 }
+      );
+    }
+    const updates = await loadManifest(manifestKey(prefix));
     updates.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    return NextResponse.json({ updates });
+    return NextResponse.json({ month, monthPrefix: prefix, updates });
   } catch (e: any) {
     return NextResponse.json({ error: e.message || 'Failed to load updates' }, { status: 500 });
   }
@@ -98,11 +119,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'S3_RAW_BUCKET not configured' }, { status: 500 });
     }
     const formData = await request.formData();
+    const monthRaw = formData.get('month');
     const nameRaw = formData.get('name');
     const commentsRaw = formData.get('comments');
     const fileRaw = formData.get('file');
 
-    // Validate required fields
+    const monthStr = typeof monthRaw === 'string' ? monthRaw : '';
+    const prefix = monthToPrefix(monthStr);
+    if (!prefix) {
+      return NextResponse.json(
+        { error: `Invalid month "${monthStr}". Expected format: "July 2026".` },
+        { status: 400 }
+      );
+    }
+
     const name = (typeof nameRaw === 'string' ? nameRaw : '').trim();
     const comments = (typeof commentsRaw === 'string' ? commentsRaw : '').trim();
     if (!name || !comments) {
@@ -116,7 +146,6 @@ export async function POST(request: Request) {
     let s3Key: string | null = null;
     let size: number | null = null;
 
-    // File is optional
     const file = fileRaw && typeof fileRaw !== 'string' ? (fileRaw as File) : null;
     if (file && file.size > 0) {
       if (file.size > MAX_FILE_BYTES) {
@@ -127,7 +156,7 @@ export async function POST(request: Request) {
       }
       filename = safeFilename(file.name || 'upload');
       const id = randomUUID();
-      s3Key = `${FILES_PREFIX}${id}-${filename}`;
+      s3Key = `${filesPrefix(prefix)}${id}-${filename}`;
       size = file.size;
       const arrayBuffer = await file.arrayBuffer();
       await s3.send(new PutObjectCommand({
@@ -148,12 +177,12 @@ export async function POST(request: Request) {
       size,
     };
 
-    // Load, append, save. This is last-write-wins - fine for our low concurrency.
-    const updates = await loadManifest();
+    const key = manifestKey(prefix);
+    const updates = await loadManifest(key);
     updates.push(newUpdate);
-    await saveManifest(updates);
+    await saveManifest(key, updates);
 
-    return NextResponse.json({ update: newUpdate });
+    return NextResponse.json({ update: newUpdate, month: monthStr, monthPrefix: prefix });
   } catch (e: any) {
     return NextResponse.json({ error: e.message || 'Failed to save update' }, { status: 500 });
   }

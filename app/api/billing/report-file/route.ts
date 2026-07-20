@@ -1,21 +1,21 @@
-// Located at: app/api/billing/report-file/route.ts
+// app/api/billing/report-file/route.ts
 //
-// Loads an Excel file from S3 and returns all its sheets WITH FORMATTING
-// (cell background/text colors, bold, italic, alignment, merged cells,
-// column widths, AND Excel number-format-code applied to numeric values so
-// currency like $1,234.56 renders as displayed in Excel, not as raw 1234.56).
+// GET ?month=July%202026 -> returns the Excel file (parsed with formatting) for that month.
 //
-// File selection priority:
-//   1. Approved key stored at s3://.../billing-updates/billing-test-approved.json
-//   2. Latest Reconciliation_Output_*.xlsx from billing-reports/
+// File selection priority per month:
+//   1. Approved key stored at s3://.../billing-updates/{YYYY-MM}/approved.json
+//   2. Reconciliation_Output_<Month>_<Year>.xlsx from billing-reports/
+//      (matched by month name + year in the filename)
+//
+// Cell values render with Excel's number format applied (currency, decimals,
+// percentages, dates) so the dashboard viewer shows the same text Excel would.
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import ExcelJS from 'exceljs';
 
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
-const APPROVED_JSON_KEY = 'billing-updates/billing-test-approved.json';
 
 const s3 = new S3Client({
   region: REGION,
@@ -31,9 +31,32 @@ async function streamToBuffer(stream: any): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-async function readApprovedKey(): Promise<string | null> {
+const MONTH_NAMES = ['january','february','march','april','may','june',
+                     'july','august','september','october','november','december'];
+
+function monthToPrefix(label: string): string | null {
+  const parts = label.trim().toLowerCase().split(/\s+/);
+  if (parts.length !== 2) return null;
+  const mi = MONTH_NAMES.indexOf(parts[0]);
+  const yr = parseInt(parts[1], 10);
+  if (mi < 0 || !Number.isFinite(yr) || yr < 2020 || yr > 2099) return null;
+  return `${yr}-${String(mi + 1).padStart(2, '0')}`;
+}
+
+// True if the filename contains the month name (any case) AND the year.
+// e.g. "Reconciliation_Output_July_2026.xlsx" matches month="July 2026".
+function filenameMatchesMonth(filename: string, month: string): boolean {
+  const parts = month.trim().toLowerCase().split(/\s+/);
+  if (parts.length !== 2) return false;
+  const [mname, year] = parts;
+  const lower = filename.toLowerCase();
+  return lower.includes(mname) && lower.includes(year);
+}
+
+async function readApprovedKey(monthPrefix: string): Promise<string | null> {
+  const key = `billing-updates/${monthPrefix}/approved.json`;
   try {
-    const res: any = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: APPROVED_JSON_KEY }));
+    const res: any = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
     const buf = await streamToBuffer(res.Body);
     const obj = JSON.parse(buf.toString('utf-8'));
     return typeof obj.approvedKey === 'string' && obj.approvedKey ? obj.approvedKey : null;
@@ -44,7 +67,7 @@ async function readApprovedKey(): Promise<string | null> {
   }
 }
 
-async function findLatestReconciliation(): Promise<string | null> {
+async function findReconciliationForMonth(month: string): Promise<string | null> {
   let token: string | undefined;
   let latestKey: string | null = null;
   let latestMod = 0;
@@ -58,6 +81,7 @@ async function findLatestReconciliation(): Promise<string | null> {
       if (!obj.Key) continue;
       const fname = obj.Key.split('/').pop() || '';
       if (!/Reconciliation_Output_.*\.xlsx$/i.test(fname)) continue;
+      if (!filenameMatchesMonth(fname, month)) continue;
       const mod = obj.LastModified ? new Date(obj.LastModified).getTime() : 0;
       if (mod > latestMod) {
         latestMod = mod;
@@ -76,7 +100,6 @@ function argbToCss(argb: string | undefined | null): string | undefined {
   if (s.length === 6) return `#${s}`;
   return undefined;
 }
-
 function borderStyleToCss(style: string | undefined): string {
   if (!style) return 'none';
   if (style === 'thin' || style === 'hair') return 'solid 1px';
@@ -88,64 +111,32 @@ function borderStyleToCss(style: string | undefined): string {
   if (style === 'dashDot' || style === 'dashDotDot') return 'dashed 1px';
   return 'solid 1px';
 }
-
-// -------------------- Excel number-format handling --------------------
-// ExcelJS exposes the format code via `cell.numFmt` (e.g. '$#,##0.00',
-// '#,##0.00_);($#,##0.00)', '0.00%', 'mm/dd/yyyy'). ExcelJS does NOT
-// apply this code when returning cell.text - we have to do it ourselves.
-//
-// This formatter handles the common cases the reconciliation output uses:
-// currency, thousands separators, decimals, percentages, accounting-style
-// negatives, and simple dates. It's not a full Excel-format engine, but
-// covers what appears in these workbooks.
-
 function countDecimals(fmt: string): number {
   const m = fmt.match(/\.(0+)/);
   return m ? m[1].length : 0;
 }
-
 function hasCurrencySign(fmt: string): boolean {
-  // Matches literal $, "$", [$USD], [$$-409-en-US], etc.
   return /\$|"\$"|\[\$/.test(fmt);
 }
-
 function formatNumberWithFmt(n: number, fmt: string | undefined): string {
   if (!fmt || fmt === 'General' || fmt === '@') {
-    // No explicit format on the cell. Excel silently rounds these on display,
-    // which is why "4681.1" looks like 4681.1 in the source file even though
-    // the underlying double reads back as 4681.0999999999985. Do the same:
-    // integers stay integers, everything else renders with 2 decimals.
     if (Number.isInteger(n)) return String(n);
     return n.toFixed(2);
   }
-
-  // Excel format codes can have multiple sections separated by ; -
-  //   positive;negative;zero;text
-  // We only strip that here for a very common accounting subset - the
-  // negative section is used to render (parens) etc.
   const sections = fmt.split(';');
   const positiveFmt = sections[0] || fmt;
   const negativeFmt = sections[1];
-
-  // Percentage
   if (positiveFmt.includes('%')) {
     const decimals = countDecimals(positiveFmt);
     return (n * 100).toFixed(decimals) + '%';
   }
-
   const isNeg = n < 0;
   const absN = Math.abs(n);
   const decimals = countDecimals(positiveFmt);
   const useThousands = /#,##0|#,#/.test(positiveFmt);
   const useCurrency = hasCurrencySign(positiveFmt);
-
-  // Accounting format: exact zero rendered as "-" (with currency sign kept)
-  // pattern used by openpyxl / Excel accounting: '_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)'
   const isAccountingZero = n === 0 && (fmt.includes('"-"') || /_\(/.test(fmt));
-  if (isAccountingZero) {
-    return useCurrency ? '$ -' : '-';
-  }
-
+  if (isAccountingZero) return useCurrency ? '$ -' : '-';
   let body: string;
   if (useThousands) {
     body = absN.toLocaleString('en-US', {
@@ -155,26 +146,17 @@ function formatNumberWithFmt(n: number, fmt: string | undefined): string {
   } else {
     body = absN.toFixed(decimals);
   }
-
   const prefix = useCurrency ? '$' : '';
-
   if (isNeg) {
-    // If the negative section wraps in parens, use parens
     const negWantsParens = negativeFmt ? /\(.*\)/.test(negativeFmt) : /\(.*\)/.test(positiveFmt);
     if (negWantsParens) return `(${prefix}${body})`;
     return `-${prefix}${body}`;
   }
   return `${prefix}${body}`;
 }
-
-// Excel serial date -> JS Date. Excel counts from 1900-01-01 as day 1,
-// but has a bug pretending 1900 was a leap year - hence the -25569 offset
-// and 86400 seconds per day. This maps to the same instant JS represents.
 function excelSerialToDate(serial: number): Date {
-  const ms = (serial - 25569) * 86400 * 1000;
-  return new Date(ms);
+  return new Date((serial - 25569) * 86400 * 1000);
 }
-
 function formatDateWithFmt(d: Date, fmt: string | undefined): string {
   if (!fmt) return d.toLocaleDateString('en-US');
   const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -184,59 +166,39 @@ function formatDateWithFmt(d: Date, fmt: string | undefined): string {
   const m = String(d.getMonth() + 1);
   const day = String(d.getDate());
   const lower = fmt.toLowerCase();
-  // Order matters: check longer patterns first
   if (lower.includes('yyyy')) {
     if (lower.includes('mm/dd')) return `${mm}/${dd}/${yyyy}`;
     if (lower.includes('mm-dd')) return `${mm}-${dd}-${yyyy}`;
     if (lower.includes('m/d')) return `${m}/${day}/${yyyy}`;
     return `${m}/${day}/${yyyy}`;
   }
-  if (lower.includes('yy')) {
-    return `${m}/${day}/${yy}`;
-  }
-  // Fall back to locale
+  if (lower.includes('yy')) return `${m}/${day}/${yy}`;
   return d.toLocaleDateString('en-US');
 }
-
-// Detect whether a format code represents a date/time
 function isDateFmt(fmt: string | undefined): boolean {
   if (!fmt) return false;
   return /[ymdhs]/i.test(fmt) && !/^[@#0.,]+$/.test(fmt);
 }
-
-// Turn any cell value + numFmt into the display string that Excel would show.
 function renderCell(value: any, numFmt: string | undefined): string {
   if (value === null || value === undefined) return '';
-
-  // Rich text -> concatenate segments
   if (typeof value === 'object' && !(value instanceof Date)) {
-    if (Array.isArray(value.richText)) {
-      return value.richText.map((rt: any) => rt.text || '').join('');
-    }
-    // Formula cell: use the computed result and format it if numeric
+    if (Array.isArray(value.richText)) return value.richText.map((rt: any) => rt.text || '').join('');
     if ('formula' in value) {
       const result = value.result;
       if (result === undefined || result === null) return '';
       if (typeof result === 'number') {
-        if (isDateFmt(numFmt) && result > 25569) {
-          return formatDateWithFmt(excelSerialToDate(result), numFmt);
-        }
+        if (isDateFmt(numFmt) && result > 25569) return formatDateWithFmt(excelSerialToDate(result), numFmt);
         return formatNumberWithFmt(result, numFmt);
       }
       if (result instanceof Date) return formatDateWithFmt(result, numFmt);
       return String(result);
     }
-    // Hyperlink cell: use display text
     if ('hyperlink' in value) return String(value.text || value.hyperlink);
     if ('text' in value) return String(value.text);
     if (value instanceof Date) return formatDateWithFmt(value, numFmt);
   }
-
   if (typeof value === 'number') {
-    // If the format code is a date format, treat the number as an Excel serial
-    if (isDateFmt(numFmt) && value > 25569) {
-      return formatDateWithFmt(excelSerialToDate(value), numFmt);
-    }
+    if (isDateFmt(numFmt) && value > 25569) return formatDateWithFmt(excelSerialToDate(value), numFmt);
     return formatNumberWithFmt(value, numFmt);
   }
   if (value instanceof Date) return formatDateWithFmt(value, numFmt);
@@ -244,48 +206,25 @@ function renderCell(value: any, numFmt: string | undefined): string {
   return String(value);
 }
 
-// ---------------------- Sheet parsing ----------------------
-
 type ParsedCell = {
-  v: string;
-  bg?: string;
-  fg?: string;
-  b?: boolean;
-  i?: boolean;
-  a?: 'left' | 'center' | 'right';
-  bl?: string;
-  br?: string;
-  bt?: string;
-  bb?: string;
-  rs?: number;
-  cs?: number;
-  hidden?: boolean;
+  v: string; bg?: string; fg?: string; b?: boolean; i?: boolean;
+  a?: 'left'|'center'|'right';
+  bl?: string; br?: string; bt?: string; bb?: string;
+  rs?: number; cs?: number; hidden?: boolean;
 };
-
-type ParsedSheet = {
-  name: string;
-  cells: ParsedCell[][];
-  columnWidths: number[];
-};
+type ParsedSheet = { name: string; cells: ParsedCell[][]; columnWidths: number[]; };
 
 async function parseWorkbook(buffer: Buffer): Promise<ParsedSheet[]> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer as any);
-
   return wb.worksheets.map((ws) => {
     const maxCol = ws.columnCount || 0;
     const maxRow = ws.rowCount || 0;
-
-    // Column widths in Excel character units -> approximate pixels
     const columnWidths: number[] = [];
     for (let c = 1; c <= maxCol; c++) {
-      const col = ws.getColumn(c);
-      const w = col.width;
+      const w = ws.getColumn(c).width;
       columnWidths.push(w ? Math.round(w * 7.5) : 96);
     }
-
-    // Build merged-cell lookup: master coordinates get rowspan/colspan,
-    // slave coordinates get { hidden: true } so we drop them on render.
     const mergeMap = new Map<string, { rs?: number; cs?: number; hidden?: boolean }>();
     const merges: any = (ws as any).model?.merges || (ws as any)._merges || [];
     const mergeList: Array<{ top: number; left: number; bottom: number; right: number }> = [];
@@ -294,17 +233,8 @@ async function parseWorkbook(buffer: Buffer): Promise<ParsedSheet[]> {
         if (typeof rng === 'string') {
           const m = rng.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
           if (m) {
-            const colLetterToNum = (letters: string) => {
-              let n = 0;
-              for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
-              return n;
-            };
-            mergeList.push({
-              left: colLetterToNum(m[1]),
-              top: parseInt(m[2], 10),
-              right: colLetterToNum(m[3]),
-              bottom: parseInt(m[4], 10),
-            });
+            const l2n = (letters: string) => { let n = 0; for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64); return n; };
+            mergeList.push({ left: l2n(m[1]), top: parseInt(m[2],10), right: l2n(m[3]), bottom: parseInt(m[4],10) });
           }
         }
       }
@@ -325,84 +255,76 @@ async function parseWorkbook(buffer: Buffer): Promise<ParsedSheet[]> {
         }
       }
     }
-
     const cells: ParsedCell[][] = [];
     for (let r = 1; r <= maxRow; r++) {
       const row = ws.getRow(r);
       const rowCells: ParsedCell[] = [];
       for (let c = 1; c <= maxCol; c++) {
         const cell = row.getCell(c);
-        const key = `${r},${c}`;
-        const mInfo = mergeMap.get(key);
-
-        if (mInfo?.hidden) {
-          rowCells.push({ v: '', hidden: true });
-          continue;
-        }
-
+        const mInfo = mergeMap.get(`${r},${c}`);
+        if (mInfo?.hidden) { rowCells.push({ v: '', hidden: true }); continue; }
         const style = (cell.style || {}) as any;
-        const fill = style.fill;
-        const font = style.font;
-        const align = style.alignment;
-        const border = style.border || {};
-
-        // ExcelJS surfaces numFmt in a couple places depending on how the
-        // workbook was authored. Check both.
-        const numFmt: string | undefined =
-          (cell as any).numFmt || style.numFmt || undefined;
-
+        const fill = style.fill; const font = style.font;
+        const align = style.alignment; const border = style.border || {};
+        const numFmt: string | undefined = (cell as any).numFmt || style.numFmt || undefined;
         let bg: string | undefined;
         if (fill?.type === 'pattern' && fill.pattern !== 'none') {
           bg = argbToCss(fill.fgColor?.argb) || argbToCss(fill.bgColor?.argb);
         }
         const fg = argbToCss(font?.color?.argb);
         const h = align?.horizontal;
-        const a: 'left' | 'center' | 'right' | undefined =
-          h === 'center' || h === 'centerContinuous' ? 'center' :
-          h === 'right' || h === 'end' ? 'right' :
-          h === 'left' || h === 'start' ? 'left' : undefined;
-
+        const a = h === 'center' || h === 'centerContinuous' ? 'center' :
+                  h === 'right' || h === 'end' ? 'right' :
+                  h === 'left' || h === 'start' ? 'left' : undefined;
         const borderCss = (side: any) => {
           if (!side || !side.style) return undefined;
           const color = argbToCss(side.color?.argb) || '#666666';
-          const style = borderStyleToCss(side.style);
-          return `${style} ${color}`;
+          return `${borderStyleToCss(side.style)} ${color}`;
         };
-
         rowCells.push({
           v: renderCell(cell.value, numFmt),
-          bg,
-          fg,
+          bg, fg,
           b: font?.bold ? true : undefined,
           i: font?.italic ? true : undefined,
-          a,
-          bl: borderCss(border.left),
-          br: borderCss(border.right),
-          bt: borderCss(border.top),
-          bb: borderCss(border.bottom),
+          a: a as any,
+          bl: borderCss(border.left), br: borderCss(border.right),
+          bt: borderCss(border.top),  bb: borderCss(border.bottom),
           rs: mInfo?.rs && mInfo.rs > 1 ? mInfo.rs : undefined,
           cs: mInfo?.cs && mInfo.cs > 1 ? mInfo.cs : undefined,
         });
       }
       cells.push(rowCells);
     }
-
     return { name: ws.name, cells, columnWidths };
   });
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const approvedKey = await readApprovedKey();
-    const key = approvedKey || (await findLatestReconciliation());
+    const { searchParams } = new URL(req.url);
+    const month = searchParams.get('month') || '';
+    const monthPrefix = monthToPrefix(month);
+    if (!monthPrefix) {
+      return NextResponse.json(
+        { error: `Invalid month "${month}". Expected format: "July 2026".` },
+        { status: 400 }
+      );
+    }
+
+    // 1. Approved file wins
+    const approvedKey = await readApprovedKey(monthPrefix);
+    // 2. Otherwise the reconciliation output for the requested month
+    const key = approvedKey || (await findReconciliationForMonth(month));
 
     if (!key) {
       return NextResponse.json({
+        month,
+        monthPrefix,
         sourceFile: null,
         approvedKey: null,
         lastModified: null,
         sheets: [],
-        message: 'No reconciliation output found. Run the reconcile-billing Lambda or approve a chat file.',
+        message: `No reconciliation output or approved file for ${month}.`,
       });
     }
 
@@ -411,14 +333,13 @@ export async function GET() {
       objRes = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
     } catch (err: any) {
       if ((err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) && approvedKey) {
-        const fallback = await findLatestReconciliation();
+        // Approved key stale; fall back to the reconciliation file for the month
+        const fallback = await findReconciliationForMonth(month);
         if (!fallback) {
           return NextResponse.json({
-            sourceFile: null,
-            approvedKey: null,
-            lastModified: null,
-            sheets: [],
-            message: 'Approved file was removed and no default reconciliation exists.',
+            month, monthPrefix,
+            sourceFile: null, approvedKey: null, lastModified: null, sheets: [],
+            message: `Approved file was removed and no reconciliation output for ${month}.`,
           });
         }
         objRes = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fallback }));
@@ -432,6 +353,8 @@ export async function GET() {
     const filename = key.split('/').pop() || key;
 
     return NextResponse.json({
+      month,
+      monthPrefix,
       sourceFile: key,
       filename,
       approvedKey,

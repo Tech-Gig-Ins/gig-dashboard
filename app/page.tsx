@@ -611,6 +611,17 @@ export default function Dashboard() {
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
 
+  // === Per-month billing state ===
+  type BillingMonth = { prefix: string; label: string; hasReport: boolean; hasChat: boolean; lastActivity: string | null };
+  const [billingSelectedMonth, setBillingSelectedMonth] = useState<string>('July 2026');
+  const [billingMonthsList, setBillingMonthsList] = useState<BillingMonth[]>([]);
+  const [billingMonthsLoading, setBillingMonthsLoading] = useState(false);
+  const [showBillingNewMonthDialog, setShowBillingNewMonthDialog] = useState(false);
+  const [newBillingMonthDraft, setNewBillingMonthDraft] = useState<{ monthIdx: number; year: number }>({
+    monthIdx: new Date().getMonth(),
+    year: new Date().getFullYear(),
+  });
+
   // Load the All Info files listing. Extracted from useEffect so we can refresh
   // it after new files are uploaded via the upload modal.
   function loadAllFilesData() {
@@ -1189,13 +1200,12 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (activeTab !== 'billing') return;
-    // Load the chat updates if not already loaded (shared with Billing tab)
-    if (updates.length === 0 && !updatesLoading && !updatesError) {
-      loadUpdates();
-    }
+    if (!billingSelectedMonth) return;
+    // Load the chat updates for the selected month
+    loadUpdates();
     setBillingLoading(true);
     setBillingError(null);
-    fetch('/api/billing/report-file')
+    fetch(`/api/billing/report-file?month=${encodeURIComponent(billingSelectedMonth)}`)
       .then(res => {
         if (!res.ok) throw new Error(`Load failed: ${res.status}`);
         return res.json();
@@ -1213,7 +1223,21 @@ export default function Dashboard() {
         setBillingError(e.message || 'Failed to load report');
         setBillingLoading(false);
       });
-  }, [activeTab, billingRefetchTick]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, billingRefetchTick, billingSelectedMonth]);
+
+  // Load the list of billing months on tab activation
+  useEffect(() => {
+    if (activeTab !== 'billing') return;
+    setBillingMonthsLoading(true);
+    fetch('/api/billing/months')
+      .then(res => res.json())
+      .then((data: { months: BillingMonth[] }) => {
+        setBillingMonthsList(data.months || []);
+        setBillingMonthsLoading(false);
+      })
+      .catch(() => setBillingMonthsLoading(false));
+  }, [activeTab]);
 
   // Load consultant tab data whenever the tab is activated or the month changes.
   useEffect(() => {
@@ -1263,7 +1287,7 @@ export default function Dashboard() {
       const res = await fetch('/api/billing/approve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: approvalTargetKey, passcode: approvalPasscode }),
+        body: JSON.stringify({ key: approvalTargetKey, passcode: approvalPasscode, month: billingSelectedMonth }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1286,9 +1310,10 @@ export default function Dashboard() {
   }
 
   function loadUpdates() {
+    if (!billingSelectedMonth) return;
     setUpdatesLoading(true);
     setUpdatesError(null);
-    fetch('/api/billing/updates')
+    fetch(`/api/billing/updates?month=${encodeURIComponent(billingSelectedMonth)}`)
       .then(res => {
         if (!res.ok) throw new Error(`Updates API failed: ${res.status}`);
         return res.json();
@@ -1315,6 +1340,7 @@ export default function Dashboard() {
     setUploading(true);
     try {
       const fd = new FormData();
+      fd.append('month', billingSelectedMonth);
       fd.append('name', name);
       fd.append('comments', comments);
       if (uploadFile) fd.append('file', uploadFile);
@@ -2077,6 +2103,7 @@ export default function Dashboard() {
         .billing-header-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 32px; flex-wrap: wrap; }
         .billing-title-block h2 { font-family: 'Fraunces', serif; font-size: 32px; font-weight: 500; color: #ffffff; margin: 0 0 6px; letter-spacing: -0.02em; }
         .billing-title-block .billing-subtitle { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); }
+        .billing-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
         .billing-download-btn { background: rgba(107, 164, 255, 0.15); color: #6ba4ff; border: 1px solid rgba(107, 164, 255, 0.4); padding: 10px 20px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; display: inline-flex; align-items: center; }
         .billing-download-btn:hover { background: rgba(107, 164, 255, 0.28); border-color: rgba(107, 164, 255, 0.7); }
 
@@ -3413,29 +3440,53 @@ export default function Dashboard() {
                   <div className="billing-title-block">
                     <h2>Billing</h2>
                     <div className="billing-subtitle">
-                      Displaying: {billingReport.filename || (billingReport.sourceFile ? billingReport.sourceFile.split('/').pop() : 'no file loaded')}
+                      {billingSelectedMonth} · Displaying: {billingReport.filename || (billingReport.sourceFile ? billingReport.sourceFile.split('/').pop() : 'no file loaded')}
                       {billingReport.approvedKey && (
                         <> · <span style={{ color: '#80d090', fontWeight: 600 }}>APPROVED FILE</span></>
                       )}
                     </div>
                   </div>
-                  {billingReport.sourceFile && (
-                    <button
-                      className="billing-download-btn"
-                      onClick={() => handleDownload(
-                        billingReport.sourceFile!,
-                        billingReport.filename || billingReport.sourceFile!.split('/').pop() || 'billing.xlsx'
-                      )}
-                      title="Download the currently displayed Excel file"
+                  <div className="billing-actions">
+                    <select
+                      className="consultant-month-select"
+                      value={billingSelectedMonth}
+                      onChange={(e) => setBillingSelectedMonth(e.target.value)}
+                      disabled={billingMonthsLoading}
+                      title="Month whose reconciliation file and chat are displayed"
                     >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 8, verticalAlign: '-2px' }}>
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                        <polyline points="7 10 12 15 17 10" />
-                        <line x1="12" y1="15" x2="12" y2="3" />
-                      </svg>
-                      Download Excel
+                      {/* If the current selection isn't in the list yet (fresh month), keep it visible */}
+                      {billingSelectedMonth && !billingMonthsList.some(m => m.label === billingSelectedMonth) && (
+                        <option value={billingSelectedMonth}>{billingSelectedMonth} (new)</option>
+                      )}
+                      {billingMonthsList.map(m => (
+                        <option key={m.prefix} value={m.label}>{m.label}</option>
+                      ))}
+                    </select>
+                    <button
+                      className="consultant-new-month-btn"
+                      onClick={() => setShowBillingNewMonthDialog(true)}
+                      title="Add a new month to upload files or comments for"
+                    >
+                      + New Month
                     </button>
-                  )}
+                    {billingReport.sourceFile && (
+                      <button
+                        className="billing-download-btn"
+                        onClick={() => handleDownload(
+                          billingReport.sourceFile!,
+                          billingReport.filename || billingReport.sourceFile!.split('/').pop() || 'billing.xlsx'
+                        )}
+                        title="Download the currently displayed Excel file"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 8, verticalAlign: '-2px' }}>
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="7 10 12 15 17 10" />
+                          <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                        Download Excel
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {billingReport.sheets.length === 0 ? (
@@ -3618,6 +3669,47 @@ export default function Dashboard() {
                   )}
                 </div>
               </>
+            )}
+            {/* New Month dialog for Billing */}
+            {showBillingNewMonthDialog && (
+              <div className="consultant-modal-overlay" onClick={() => setShowBillingNewMonthDialog(false)}>
+                <div className="consultant-modal" onClick={(e) => e.stopPropagation()}>
+                  <h3>Add a New Month to Billing</h3>
+                  <p>Pick a month to display or start posting updates for. The dropdown will show it right away; a chat manifest gets created the first time you post an update.</p>
+                  <div className="consultant-modal-row">
+                    <label>Month</label>
+                    <select
+                      value={newBillingMonthDraft.monthIdx}
+                      onChange={(e) => setNewBillingMonthDraft(d => ({ ...d, monthIdx: parseInt(e.target.value, 10) }))}
+                    >
+                      {MONTH_NAMES_LONG.map((n, i) => (
+                        <option key={i} value={i}>{n}</option>
+                      ))}
+                    </select>
+                    <label>Year</label>
+                    <input
+                      type="number"
+                      min={2020}
+                      max={2099}
+                      value={newBillingMonthDraft.year}
+                      onChange={(e) => setNewBillingMonthDraft(d => ({ ...d, year: parseInt(e.target.value, 10) || d.year }))}
+                    />
+                  </div>
+                  <div className="consultant-modal-actions">
+                    <button className="consultant-secondary-btn" onClick={() => setShowBillingNewMonthDialog(false)}>Cancel</button>
+                    <button
+                      className="consultant-primary-btn"
+                      onClick={() => {
+                        const label = `${MONTH_NAMES_LONG[newBillingMonthDraft.monthIdx]} ${newBillingMonthDraft.year}`;
+                        setBillingSelectedMonth(label);
+                        setShowBillingNewMonthDialog(false);
+                      }}
+                    >
+                      Add Month
+                    </button>
+                  </div>
+                </div>
+              </div>
             )}
           </div>
         )}
