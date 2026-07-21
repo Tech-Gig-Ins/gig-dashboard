@@ -5,15 +5,15 @@
 // (its latest upload vs its second-latest upload), so a missing monthly upload
 // for one file never affects other files' data.
 //
-//   - activeMembers:     union of every canonical file's LATEST-AVAILABLE upload.
-//                        If Northstead is missing in July but present in June,
-//                        June's Northstead members are still counted as active.
-//   - terminatedMembers: for each file, members in its second-latest upload but
-//                        not in its latest upload (term date = end of the
-//                        second-latest upload's month).
-//   - newMembers:        for each file, members in its latest upload but not in
-//                        its second-latest upload (effective date = first of
-//                        the latest upload's month).
+// - activeMembers:     union of every canonical file's LATEST-AVAILABLE upload.
+//                      If Northstead is missing in July but present in June,
+//                      June's Northstead members are still counted as active.
+// - terminatedMembers: for each file, members in its second-latest upload but
+//                      not in its latest upload (term date = end of the
+//                      second-latest upload's month).
+// - newMembers:        for each file, members in its latest upload but not in
+//                      its second-latest upload (effective date = first of
+//                      the latest upload's month).
 //
 // Files that have only ever been uploaded once contribute to activeMembers but
 // not to terminated/new (no basis for comparison).
@@ -405,8 +405,19 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
     } else if (lowerKey.endsWith('.xlsx') || lowerKey.endsWith('.xls')) {
       const wb = XLSX.read(buffer, { type: 'buffer' });
       let sheetName = wb.SheetNames[0];
-      if (lowerKey.includes('corechoice') && wb.SheetNames.includes('Empire BCBS')) {
-        sheetName = 'Empire BCBS';
+      // Corechoice Direct T1/T3, Decisely GWU1/GWU2, and any GWU1/GWU2 file:
+      // read ONLY the Anthem Medical sheet. Falls back to the first sheet if
+      // no Anthem Medical sheet exists in the workbook.
+      const normKey = lowerKey.replace(/[^a-z0-9]/g, '');
+      const anthemMedicalOnly =
+        (normKey.includes('corechoice') && (normKey.includes('t1') || normKey.includes('t3'))) ||
+        normKey.includes('gwu1') ||
+        normKey.includes('gwu2');
+      if (anthemMedicalOnly) {
+        const anthemSheet = wb.SheetNames.find(
+          (n) => n.toLowerCase().replace(/[^a-z0-9]/g, '').includes('anthemmedical')
+        );
+        if (anthemSheet) sheetName = anthemSheet;
       }
       const ws = wb.Sheets[sheetName];
       const allData: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });

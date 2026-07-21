@@ -179,8 +179,19 @@ async function searchFile(key: string, query: string): Promise<MatchResult | nul
     } else if (lowerKey.endsWith('.xlsx') || lowerKey.endsWith('.xls')) {
       const wb = XLSX.read(buffer, { type: 'buffer' });
       let sheetName = wb.SheetNames[0];
-      if (lowerKey.includes('corechoice') && wb.SheetNames.includes('Empire BCBS')) {
-        sheetName = 'Empire BCBS';
+      // Corechoice Direct T1/T3, Decisely GWU1/GWU2, and any GWU1/GWU2 file:
+      // read ONLY the Anthem Medical sheet. Falls back to the first sheet if
+      // no Anthem Medical sheet exists in the workbook.
+      const normKey = lowerKey.replace(/[^a-z0-9]/g, '');
+      const anthemMedicalOnly =
+        (normKey.includes('corechoice') && (normKey.includes('t1') || normKey.includes('t3'))) ||
+        normKey.includes('gwu1') ||
+        normKey.includes('gwu2');
+      if (anthemMedicalOnly) {
+        const anthemSheet = wb.SheetNames.find(
+          (n) => n.toLowerCase().replace(/[^a-z0-9]/g, '').includes('anthemmedical')
+        );
+        if (anthemSheet) sheetName = anthemSheet;
       }
       const ws = wb.Sheets[sheetName];
       const allData: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
@@ -243,7 +254,7 @@ async function searchFile(key: string, query: string): Promise<MatchResult | nul
     const subscriberCols = classifiedCols.filter(c => c.role === 'subscriber');
 
     // Normalize: lowercase and strip non-alphabetic characters
-    // So "BEENE, ALICE" → "beenealice", "Alice Beene" → "alicebeene"
+    // So "BEENE, ALICE" -> "beenealice", "Alice Beene" -> "alicebeene"
     const normalize = (s: string): string =>
       String(s || '').toLowerCase().replace(/[^a-z]/g, '');
 
@@ -344,22 +355,22 @@ export async function GET(request: Request) {
         ContinuationToken: token,
       });
       const res = await s3.send(cmd);
-    for (const obj of res.Contents || []) {
-      if (!obj.Key || obj.Key.endsWith('/')) continue;
-      const lower = obj.Key.toLowerCase();
-      if (!lower.endsWith('.csv') && !lower.endsWith('.xlsx') && !lower.endsWith('.xls')) continue;
+      for (const obj of res.Contents || []) {
+        if (!obj.Key || obj.Key.endsWith('/')) continue;
+        const lower = obj.Key.toLowerCase();
+        if (!lower.endsWith('.csv') && !lower.endsWith('.xlsx') && !lower.endsWith('.xls')) continue;
 
-      // Hardcoded: only search May 2026 files (change this when filter changes in page.tsx)
-// Filter: only files from May 2026 onwards
-      const filename = obj.Key.split('/').pop() || obj.Key;
-      const detected = detectMonthYearForSearch(filename);
-      if (!detected) continue;
-      if (detected.year < 2026) continue;
-      if (detected.year === 2026 && detected.month < 4) continue; // 4 = May
-      // (month 4 = May, since JS months are 0-indexed: January=0, May=4)
+        // Hardcoded: only search May 2026 files (change this when filter changes in page.tsx)
+        // Filter: only files from May 2026 onwards
+        const filename = obj.Key.split('/').pop() || obj.Key;
+        const detected = detectMonthYearForSearch(filename);
+        if (!detected) continue;
+        if (detected.year < 2026) continue;
+        if (detected.year === 2026 && detected.month < 4) continue; // 4 = May
+        // (month 4 = May, since JS months are 0-indexed: January=0, May=4)
 
-      fileKeys.push(obj.Key);
-    }
+        fileKeys.push(obj.Key);
+      }
       token = res.IsTruncated ? res.NextContinuationToken : undefined;
     } while (token);
 

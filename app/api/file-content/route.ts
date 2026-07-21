@@ -132,10 +132,20 @@ export async function GET(request: Request) {
     if (lowerKey.endsWith('.xlsx') || lowerKey.endsWith('.xls')) {
       const wb = XLSX.read(buffer, { type: 'buffer' });
 
-      // Special case: CoreChoice files only use Empire BCBS sheet
       let sheetName = wb.SheetNames[0];
-      if (lowerKey.includes('corechoice') && wb.SheetNames.includes('Empire BCBS')) {
-        sheetName = 'Empire BCBS';
+      // Corechoice Direct T1/T3, Decisely GWU1/GWU2, and any GWU1/GWU2 file:
+      // read ONLY the Anthem Medical sheet. Falls back to the first sheet if
+      // no Anthem Medical sheet exists in the workbook.
+      const normKey = lowerKey.replace(/[^a-z0-9]/g, '');
+      const anthemMedicalOnly =
+        (normKey.includes('corechoice') && (normKey.includes('t1') || normKey.includes('t3'))) ||
+        normKey.includes('gwu1') ||
+        normKey.includes('gwu2');
+      if (anthemMedicalOnly) {
+        const anthemSheet = wb.SheetNames.find(
+          (n) => n.toLowerCase().replace(/[^a-z0-9]/g, '').includes('anthemmedical')
+        );
+        if (anthemSheet) sheetName = anthemSheet;
       }
 
       const ws = wb.Sheets[sheetName];
