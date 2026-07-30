@@ -239,6 +239,25 @@ function monthLabel(year: number, month: number): string {
   return `${MONTH_NAMES[month]} ${year}`;
 }
 
+// CAREFUL: monthKey() above is ZERO-based (July 2026 -> "2026-06") because it is
+// built from JS month indices. The inclusion manifests in S3 are CALENDAR-based
+// (July 2026 -> "manifests/2026-07.json"), matching what the Lambda computes.
+// Both conversions live here so the two numbering schemes never get crossed.
+function manifestMonthKey(year: number, month: number): string {
+  return `${year}-${String(month + 1).padStart(2, '0')}`;
+}
+
+// "July 2026" -> "2026-07". Returns null if the label isn't parseable.
+function labelToManifestMonth(label: string): string | null {
+  const parts = label.trim().split(/\s+/);
+  if (parts.length !== 2) return null;
+  const mi = MONTH_LOOKUP[parts[0].toLowerCase()];
+  const yr = parseInt(parts[1], 10);
+  if (mi === undefined || !Number.isFinite(yr)) return null;
+  return manifestMonthKey(yr, mi);
+}
+
+
 function prettifySystemName(raw: string): string {
   const map: Record<string, string> = {
     enrollconfidently: 'Enroll Confidently',
@@ -427,6 +446,15 @@ export default function Dashboard() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Inclusion manifest state. Keyed by CALENDAR month ("2026-07"), value is the
+  // set of included S3 keys for that month. This is the single gate that decides
+  // which files count toward Master Dashboard and Consultant Report numbers.
+  const [includedByMonth, setIncludedByMonth] = useState<Record<string, Set<string>>>({});
+  const [manifestMonthsLoaded, setManifestMonthsLoaded] = useState<Set<string>>(new Set());
+  // Keyed by S3 key, true while a toggle POST is in flight for that file.
+  const [includeSaving, setIncludeSaving] = useState<Record<string, boolean>>({});
+  const [includeError, setIncludeError] = useState<string>('');
+
   // Master dashboard state
   const [masterData, setMasterData] = useState<MasterData | null>(null);
   const [masterLoading, setMasterLoading] = useState(false);
@@ -500,28 +528,10 @@ export default function Dashboard() {
   const [draftConsultantFilters, setDraftConsultantFilters] = useState<ConsultantFilterState>(emptyConsultantFilter);
   const [appliedConsultantFilters, setAppliedConsultantFilters] = useState<ConsultantFilterState>(emptyConsultantFilter);
 
-  // === NEW Consultant tab state (Lambda-driven report) ===
-  // Same 10 required source-file slots the Python Lambda expects. Order = display order.
-  const CONSULTANT_REQUIRED_SLOTS: Array<[string, string]> = [
-    ['TPA_Cassena',           'Cassena (TPA)'],
-    ['TPA_Northstead',        'Northstead (TPA)'],
-    ['TPA_GWU3',              'GWU3 (TPA)'],
-    ['TPA_GIG',               'GIG TPA.com'],
-    ['TPA_BDSB',              'BDSB (TPA)'],
-    ['426_EP6',               'EP6IX (426)'],
-    ['PIOPAC',                'PIOPAC'],
-    ['CoreChoice_Direct_T1',  'Decisely GWU2 (CoreChoice T1)'],
-    ['CoreChoice_Direct_T3',  'Decisely GWU1 (CoreChoice T3)'],
-    ['Gig_Workers',           'Refresh (Gig Workers)'],
-  ];
+  // === Consultant tab state (Lambda-driven report) ===
+  // The 10-slot upload checklist is gone. Inclusion is set in All Info and stored
+  // in manifests/{YYYY-MM}.json; the Lambda parses whatever that manifest lists.
   type ConsultantMonth = { prefix: string; label: string; hasReport: boolean; hasDirectory: boolean; complete: boolean; generatedAt: string | null };
-  type ConsultantSlot = { slot: string; label: string; uploaded: boolean; filename: string | null; s3Key: string | null; size: number | null; lastModified: string | null };
-  type ConsultantUploadStatus = {
-    month: string; monthPrefix: string;
-    slots: ConsultantSlot[];
-    uploadedCount: number; requiredCount: number; complete: boolean;
-    hasExistingUpload: boolean; totalFilesInPrefix: number;
-  };
   type ConsultantSheetCell = {
     v: string;
     bg?: string; fg?: string; b?: boolean; i?: boolean;
@@ -541,12 +551,9 @@ export default function Dashboard() {
   const [consultantSelectedMonth, setConsultantSelectedMonth] = useState<string>('');
   const [consultantMonthsList, setConsultantMonthsList] = useState<ConsultantMonth[]>([]);
   const [consultantMonthsLoading, setConsultantMonthsLoading] = useState(false);
-  const [consultantUploads, setConsultantUploads] = useState<ConsultantUploadStatus | null>(null);
-  const [consultantUploadsLoading, setConsultantUploadsLoading] = useState(false);
   const [consultantReportView, setConsultantReportView] = useState<ConsultantReportResp | null>(null);
   const [consultantReportLoading, setConsultantReportLoading] = useState(false);
   const [consultantGenerating, setConsultantGenerating] = useState(false);
-  const [consultantUploading, setConsultantUploading] = useState(false);
   const [consultantOpError, setConsultantOpError] = useState<string>('');
   const [consultantActiveReportSheet, setConsultantActiveReportSheet] = useState<string>('');
   const [consultantActiveDirectorySheet, setConsultantActiveDirectorySheet] = useState<string>('');
@@ -555,7 +562,6 @@ export default function Dashboard() {
     monthIdx: new Date().getMonth(),
     year: new Date().getFullYear(),
   });
-  const consultantFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Billing tab state
   // Rich sheet data with formatting - used by Billing tab.
@@ -657,6 +663,97 @@ export default function Dashboard() {
     setMounted(true);
     loadAllFilesData();
   }, []);
+
+  // ==================== INCLUSION MANIFESTS ====================
+  // GET manifests/{YYYY-MM}.json for one calendar month and cache the key set.
+  async function loadManifest(mfMonth: string) {
+    try {
+      const res = await fetch(`/api/manifest?month=${encodeURIComponent(mfMonth)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load manifest');
+      setIncludedByMonth((prev) => ({
+        ...prev,
+        [mfMonth]: new Set<string>(data.included || []),
+      }));
+    } catch (e: any) {
+      setIncludeError(e.message || 'Failed to load inclusion manifest');
+      // Cache an empty set so the UI renders "not included" instead of hanging.
+      setIncludedByMonth((prev) => ({ ...prev, [mfMonth]: prev[mfMonth] || new Set<string>() }));
+    } finally {
+      setManifestMonthsLoaded((prev) => new Set(prev).add(mfMonth));
+    }
+  }
+
+  // Fetch every manifest month we don't already have, in parallel.
+  async function loadManifestsFor(mfMonths: string[]) {
+    const missing = mfMonths.filter((m) => m && !manifestMonthsLoaded.has(m));
+    if (missing.length === 0) return;
+    await Promise.all(Array.from(new Set(missing)).map((m) => loadManifest(m)));
+  }
+
+  function isIncluded(mfMonth: string, key: string): boolean {
+    return includedByMonth[mfMonth]?.has(key) ?? false;
+  }
+
+  function includedCount(mfMonth: string): number {
+    return includedByMonth[mfMonth]?.size ?? 0;
+  }
+
+  // Toggle one file's inclusion. Optimistic update, rolled back on failure.
+  async function toggleIncluded(mfMonth: string, key: string, next: boolean) {
+    if (includeSaving[key]) return;
+    setIncludeSaving((prev) => ({ ...prev, [key]: true }));
+    setIncludeError('');
+
+    setIncludedByMonth((prev) => {
+      const set = new Set(prev[mfMonth] || []);
+      if (next) set.add(key);
+      else set.delete(key);
+      return { ...prev, [mfMonth]: set };
+    });
+
+    try {
+      const res = await fetch('/api/manifest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month: mfMonth, key, included: next }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update manifest');
+      // Trust the server's post-write view over the optimistic one.
+      setIncludedByMonth((prev) => ({
+        ...prev,
+        [mfMonth]: new Set<string>(data.included || []),
+      }));
+      // Master numbers are derived from the manifest, so force a refetch.
+      setMasterData(null);
+    } catch (e: any) {
+      setIncludeError(e.message || 'Failed to update manifest');
+      setIncludedByMonth((prev) => {
+        const set = new Set(prev[mfMonth] || []);
+        if (next) set.delete(key);
+        else set.add(key);
+        return { ...prev, [mfMonth]: set };
+      });
+    } finally {
+      setIncludeSaving((prev) => {
+        const copy = { ...prev };
+        delete copy[key];
+        return copy;
+      });
+    }
+  }
+
+  // Include or exclude every file in one month block in one go. Sequential so a
+  // burst of toggles can't interleave writes to the same manifest object
+  // (the route is last-write-wins, which would otherwise drop keys).
+  async function setIncludedBulk(mfMonth: string, keys: string[], next: boolean) {
+    setIncludeError('');
+    for (const key of keys) {
+      if (isIncluded(mfMonth, key) === next) continue;
+      await toggleIncluded(mfMonth, key, next);
+    }
+  }
 
   async function handleDownload(fileKey: string, filename: string) {
     try {
@@ -1061,23 +1158,6 @@ export default function Dashboard() {
     }
   }
 
-  // Fetch which of the 10 required slots are filled for the given month.
-  async function fetchConsultantUploads(month: string) {
-    if (!month) return;
-    setConsultantUploadsLoading(true);
-    try {
-      const res = await fetch(`/api/consultant/check-uploads?month=${encodeURIComponent(month)}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to check uploads');
-      setConsultantUploads(data);
-    } catch (e: any) {
-      setConsultantOpError(e.message || 'Failed to check uploads');
-      setConsultantUploads(null);
-    } finally {
-      setConsultantUploadsLoading(false);
-    }
-  }
-
   // Fetch the generated report + directory for the given month.
   async function fetchConsultantReport(month: string) {
     if (!month) return;
@@ -1098,50 +1178,8 @@ export default function Dashboard() {
     }
   }
 
-  // Upload one or more files for the current selected month. Server validates
-  // each filename against the 10 required patterns and rejects unmatched files.
-  async function handleConsultantUpload(files: FileList | File[]) {
-    if (!consultantSelectedMonth) {
-      setConsultantOpError('Pick or add a month first.');
-      return;
-    }
-    const arr = Array.from(files);
-    if (arr.length === 0) return;
-    setConsultantUploading(true);
-    setConsultantOpError('');
-    try {
-      const form = new FormData();
-      form.set('month', consultantSelectedMonth);
-      for (const f of arr) form.append('files', f);
-      const res = await fetch('/api/consultant/upload', { method: 'POST', body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Upload failed');
-      // Report rejections to the user if any
-      const rejected = (data.results || []).filter((r: any) => r.status === 'rejected');
-      if (rejected.length > 0) {
-        setConsultantOpError(
-          `Rejected ${rejected.length} file(s) that didn't match any required slot: ` +
-          rejected.map((r: any) => r.filename).join(', ')
-        );
-      }
-      // Refresh upload status so the checklist updates
-      await fetchConsultantUploads(consultantSelectedMonth);
-
-      // Auto-generate the report as soon as all 10 slots are filled. Every
-      // upload that pushes us to 10/10 triggers a fresh Lambda run, which
-      // overwrites any existing report for this month.
-      if (data.stillMissingCount === 0) {
-        await handleConsultantGenerate();
-      }
-    } catch (e: any) {
-      setConsultantOpError(e.message || 'Upload failed');
-    } finally {
-      setConsultantUploading(false);
-      if (consultantFileInputRef.current) consultantFileInputRef.current.value = '';
-    }
-  }
-
   // Invoke the Lambda for the selected month. Auto-derives prev_month.
+  // Triggered only by the explicit Generate Report button now.
   async function handleConsultantGenerate() {
     if (!consultantSelectedMonth) return;
     setConsultantGenerating(true);
@@ -1169,7 +1207,7 @@ export default function Dashboard() {
     const label = `${MONTH_NAMES_LONG[newMonthDraft.monthIdx]} ${newMonthDraft.year}`;
     setConsultantSelectedMonth(label);
     setShowNewMonthDialog(false);
-    // check-uploads for a brand-new month returns 0/10 uploaded; report returns null
+    // A brand-new month has no manifest and no report until files are included.
     setConsultantReportView(null);
   }
 
@@ -1254,7 +1292,10 @@ export default function Dashboard() {
   useEffect(() => {
     if (activeTab !== 'consultant') return;
     if (!consultantSelectedMonth) return;
-    fetchConsultantUploads(consultantSelectedMonth);
+    // Refresh the manifest for this month even if it was cached from All Info,
+    // so the Generate button reflects edits made since the files were listed.
+    const mfMonth = labelToManifestMonth(consultantSelectedMonth);
+    if (mfMonth) loadManifest(mfMonth);
     fetchConsultantReport(consultantSelectedMonth);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, consultantSelectedMonth]);
@@ -1462,6 +1503,18 @@ export default function Dashboard() {
 
   // Month-first ordering used by the All Info browse view. Newest month first.
   const sortedMonthKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
+
+  // Load the inclusion manifest for every month block currently on screen.
+  // Derived from the block's year/month (not recomputed per filename) so the
+  // toggle always writes to the same month the file is displayed under.
+  useEffect(() => {
+    if (sortedMonthKeys.length === 0) return;
+    const mfMonths = sortedMonthKeys.map((mKey) =>
+      manifestMonthKey(grouped[mKey].year, grouped[mKey].month)
+    );
+    loadManifestsFor(mfMonths);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grouped]);
 
   // Define column lists for each master section
   const activeColumns: [keyof ActiveRow, string][] = [
@@ -2176,18 +2229,10 @@ export default function Dashboard() {
         .consultant-overwrite-icon { font-size: 16px; }
         .consultant-upload-actions { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
         .consultant-upload-hint { color: rgba(255, 255, 255, 0.4); font-size: 12px; font-style: italic; }
-        .consultant-slot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
-        .consultant-slot { display: flex; gap: 12px; padding: 12px 14px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.02); }
-        .consultant-slot.filled { border-color: rgba(80, 200, 120, 0.35); background: rgba(80, 200, 120, 0.06); }
-        .consultant-slot.empty { border-color: rgba(255, 100, 140, 0.25); background: rgba(255, 100, 140, 0.04); }
-        .consultant-slot-status { flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; }
-        .consultant-slot.filled .consultant-slot-status { background: rgba(80, 200, 120, 0.25); color: #80d090; }
-        .consultant-slot.empty .consultant-slot-status { background: rgba(255, 100, 140, 0.2); color: #ff9db4; }
-        .consultant-slot-body { flex: 1; min-width: 0; }
-        .consultant-slot-label { color: #ffffff; font-weight: 600; font-size: 13px; margin-bottom: 2px; }
-        .consultant-slot-substring { color: rgba(255, 255, 255, 0.5); font-size: 11px; }
-        .consultant-slot-substring code { background: rgba(107, 164, 255, 0.1); color: #6ba4ff; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
-        .consultant-slot-filename { color: rgba(255, 255, 255, 0.75); font-size: 11px; margin-top: 4px; font-family: 'JetBrains Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .consultant-included-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; }
+        .consultant-included-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-radius: 8px; border: 1px solid rgba(80, 200, 120, 0.3); background: rgba(80, 200, 120, 0.06); min-width: 0; }
+        .consultant-included-name { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 12px; color: #ffffff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .consultant-included-label { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(128, 208, 144, 0.9); white-space: nowrap; flex-shrink: 0; }
 
         .consultant-generate-panel { display: flex; justify-content: space-between; align-items: center; gap: 20px; background: rgba(107, 164, 255, 0.05); border: 1px solid rgba(107, 164, 255, 0.2); border-radius: 12px; padding: 20px 24px; margin-bottom: 24px; flex-wrap: wrap; }
         .consultant-generate-msg { color: rgba(255, 255, 255, 0.75); font-size: 13px; flex: 1; }
@@ -2277,6 +2322,11 @@ export default function Dashboard() {
         .month-heading { font-family: 'Fraunces', serif; font-size: 36px; font-weight: 500; color: #ffffff; margin: 0 0 24px; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 20px; }
         .month-heading::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(107, 164, 255, 0.4) 0%, transparent 100%); }
         .month-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); font-weight: 500; }
+        .month-included-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(128, 208, 144, 0.9); font-weight: 500; white-space: nowrap; }
+        .month-include-bulk { display: flex; gap: 8px; flex-shrink: 0; }
+        .include-bulk-btn { padding: 4px 12px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 6px; color: rgba(255, 255, 255, 0.65); font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; transition: all 0.15s ease; }
+        .include-bulk-btn:hover:not(:disabled) { background: rgba(107, 164, 255, 0.16); border-color: rgba(107, 164, 255, 0.45); color: #ffffff; }
+        .include-bulk-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
         /* Source-first browse view (All Info): outer = source, inner box = month */
         .source-block { margin-bottom: 64px; }
@@ -2302,6 +2352,12 @@ export default function Dashboard() {
         .file-item-actions { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
         .file-item-meta { font-size: 12px; color: rgba(255, 255, 255, 0.4); white-space: nowrap; }
         .file-item-excluded { font-size: 10px; letter-spacing: 0.15em; font-weight: 700; color: #ff8888; background: rgba(255, 136, 136, 0.1); border: 1px solid rgba(255, 136, 136, 0.3); padding: 2px 8px; border-radius: 3px; text-transform: uppercase; white-space: nowrap; }
+        .include-toggle { padding: 6px 14px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 500; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; min-width: 96px; }
+        .include-toggle.on { background: rgba(80, 200, 120, 0.16); border: 1px solid rgba(80, 200, 120, 0.45); color: #80d090; }
+        .include-toggle.on:hover:not(:disabled) { background: rgba(80, 200, 120, 0.28); color: #ffffff; }
+        .include-toggle.off { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.16); color: rgba(255, 255, 255, 0.5); }
+        .include-toggle.off:hover:not(:disabled) { background: rgba(80, 200, 120, 0.12); border-color: rgba(80, 200, 120, 0.35); color: #80d090; }
+        .include-toggle:disabled { opacity: 0.45; cursor: wait; }
         .download-btn { display: flex; align-items: center; gap: 6px; padding: 6px 14px; background: rgba(107, 164, 255, 0.12); border: 1px solid rgba(107, 164, 255, 0.25); border-radius: 8px; color: #6ba4ff; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
         .download-btn:hover { background: rgba(107, 164, 255, 0.22); border-color: rgba(107, 164, 255, 0.5); color: #ffffff; }
         .download-btn:active { transform: scale(0.96); }
@@ -2411,6 +2467,13 @@ export default function Dashboard() {
                 <div className="upload-files-hint">access only to admin - Andrew</div>
               </div>
             </div>
+
+            {includeError && (
+              <div className="consultant-error">
+                {includeError}
+                <button className="consultant-error-dismiss" onClick={() => setIncludeError('')}>Dismiss</button>
+              </div>
+            )}
 
             {/* SEARCH RESULTS in All Info */}
             {searchQuery && (
@@ -2524,11 +2587,36 @@ export default function Dashboard() {
                 {!loading && !error && sortedMonthKeys.map((mKey) => {
                   const monthBlock = grouped[mKey];
                   const fileCount = Object.values(monthBlock.systems).reduce((sum, files) => sum + files.length, 0);
+                  // Calendar month key for the inclusion manifest (monthBlock.month is zero-based).
+                  const mfMonth = manifestMonthKey(monthBlock.year, monthBlock.month);
+                  const monthFileKeys = Object.values(monthBlock.systems).flat().map((f) => f.key);
+                  const nIncluded = monthFileKeys.filter((k) => isIncluded(mfMonth, k)).length;
                   return (
                     <div key={mKey} className="month-block">
                       <h2 className="month-heading">
                         {monthBlock.label}
                         <span className="month-count">{fileCount} file{fileCount !== 1 ? 's' : ''}</span>
+                        <span className="month-included-count" title="Files counted in Master Dashboard and Consultant Report">
+                          {nIncluded} included
+                        </span>
+                        <span className="month-include-bulk">
+                          <button
+                            className="include-bulk-btn"
+                            onClick={() => setIncludedBulk(mfMonth, monthFileKeys, true)}
+                            disabled={nIncluded === fileCount}
+                            title={`Include all ${fileCount} files in ${monthBlock.label}`}
+                          >
+                            Include all
+                          </button>
+                          <button
+                            className="include-bulk-btn"
+                            onClick={() => setIncludedBulk(mfMonth, monthFileKeys, false)}
+                            disabled={nIncluded === 0}
+                            title={`Exclude all files in ${monthBlock.label}`}
+                          >
+                            Exclude all
+                          </button>
+                        </span>
                       </h2>
                       {Object.keys(monthBlock.systems).sort((a, b) => {
                         // Sort in canonical order; unknown/unclassified last
@@ -2559,6 +2647,20 @@ export default function Dashboard() {
                                     {isExcludedByExtension(file.filename) && (
                                       <span className="file-item-excluded" title="Excluded from Master Dashboard analysis">EXCLUDED</span>
                                     )}
+                                    <button
+                                      className={`include-toggle ${isIncluded(mfMonth, file.key) ? 'on' : 'off'}`}
+                                      onClick={(e) => { e.stopPropagation(); toggleIncluded(mfMonth, file.key, !isIncluded(mfMonth, file.key)); }}
+                                      disabled={!!includeSaving[file.key] || !manifestMonthsLoaded.has(mfMonth)}
+                                      title={
+                                        isIncluded(mfMonth, file.key)
+                                          ? `Included in ${monthBlock.label} calculations. Click to exclude.`
+                                          : `Not counted anywhere. Click to include in ${monthBlock.label} calculations.`
+                                      }
+                                    >
+                                      {includeSaving[file.key]
+                                        ? '...'
+                                        : isIncluded(mfMonth, file.key) ? '✓ Included' : 'Include'}
+                                    </button>
                                     <span className="file-item-meta">{formatBytes(file.size)} · {formatDate(file.lastModified)}</span>
                                     <button
                                       className="download-btn"
@@ -3122,17 +3224,19 @@ export default function Dashboard() {
               <div className="consultant-title-block">
                 <h2>Consultant Report</h2>
                 <div className="consultant-subtitle">
-                  {consultantSelectedMonth ? (
-                    <>
-                      {consultantSelectedMonth}
-                      {consultantUploads && (
-                        <> · {consultantUploads.uploadedCount} / {consultantUploads.requiredCount} files uploaded</>
-                      )}
-                      {consultantReportView?.report && (
-                        <> · <span style={{ color: '#80d090', fontWeight: 600 }}>REPORT GENERATED</span></>
-                      )}
-                    </>
-                  ) : (
+                  {consultantSelectedMonth ? (() => {
+                    const mfMonth = labelToManifestMonth(consultantSelectedMonth);
+                    const n = mfMonth ? includedCount(mfMonth) : 0;
+                    return (
+                      <>
+                        {consultantSelectedMonth}
+                        <> · {n} file{n !== 1 ? 's' : ''} included</>
+                        {consultantReportView?.report && (
+                          <> · <span style={{ color: '#80d090', fontWeight: 600 }}>REPORT GENERATED</span></>
+                        )}
+                      </>
+                    );
+                  })() : (
                     <>Select or add a month to begin</>
                   )}
                 </div>
@@ -3197,78 +3301,80 @@ export default function Dashboard() {
             {!consultantSelectedMonth && !consultantMonthsLoading && (
               <div className="consultant-empty-state">
                 <h3>No reports yet</h3>
-                <p>Add a month to start uploading source files and generate the first report.</p>
+                <p>Add a month, include its source files in the All Info tab, then generate the report.</p>
                 <button className="consultant-primary-btn" onClick={() => setShowNewMonthDialog(true)}>+ Add Month</button>
               </div>
             )}
 
-            {/* Upload panel - ALWAYS visible when a month is selected.
-                Report auto-generates once all 10 slots are filled. Re-uploading
-                any file always overwrites its slot and triggers a fresh generate. */}
-            {consultantSelectedMonth && consultantUploads && (
-              <div className="consultant-upload-panel">
-                <div className="consultant-upload-header">
-                  <h3>Upload source files for {consultantSelectedMonth}</h3>
-                  <div className="consultant-upload-progress">
-                    {consultantUploads.uploadedCount} of {consultantUploads.requiredCount} required files uploaded
-                    {' · '}
-                    <span style={{ color: 'rgba(107, 164, 255, 0.85)' }}>report auto-generates on the 10th file</span>
-                  </div>
-                  {(consultantReportView?.report || consultantUploads.hasExistingUpload) && (
-                    <div className="consultant-overwrite-banner">
-                      <span className="consultant-overwrite-icon">⚠</span>
-                      <span>
-                        {consultantSelectedMonth} already has {consultantReportView?.report ? 'a generated report' : 'uploaded files'}.
-                        Uploading here will overwrite matching slots and re-run the report.
-                      </span>
+            {/* Included-files panel. There is no upload step and no file-count
+                gate: whatever is included for this month in All Info is what the
+                Lambda parses. Fewer or more than 10 files is allowed. */}
+            {consultantSelectedMonth && (() => {
+              const mfMonth = labelToManifestMonth(consultantSelectedMonth);
+              const loadedManifest = !!mfMonth && manifestMonthsLoaded.has(mfMonth);
+              const keys = mfMonth ? Array.from(includedByMonth[mfMonth] || []) : [];
+              const nIncluded = keys.length;
+              return (
+                <div className="consultant-upload-panel">
+                  <div className="consultant-upload-header">
+                    <h3>Included files for {consultantSelectedMonth}</h3>
+                    <div className="consultant-upload-progress">
+                      {!loadedManifest ? (
+                        'Loading inclusion manifest...'
+                      ) : nIncluded === 0 ? (
+                        <span style={{ color: '#e0a0a0' }}>
+                          No files included for this month. Go to All Info, find {consultantSelectedMonth},
+                          and click Include on the files this report should use.
+                        </span>
+                      ) : (
+                        <>
+                          {nIncluded} file{nIncluded !== 1 ? 's' : ''} included
+                          {' · '}
+                          <span style={{ color: 'rgba(107, 164, 255, 0.85)' }}>
+                            inclusion is managed in the All Info tab
+                          </span>
+                        </>
+                      )}
                     </div>
+                    {consultantReportView?.report && (
+                      <div className="consultant-overwrite-banner">
+                        <span className="consultant-overwrite-icon">⚠</span>
+                        <span>
+                          {consultantSelectedMonth} already has a generated report.
+                          Generating again overwrites it using the current included files.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="consultant-upload-actions">
+                    <button
+                      className="consultant-primary-btn"
+                      onClick={handleConsultantGenerate}
+                      disabled={consultantGenerating || nIncluded === 0}
+                    >
+                      {consultantGenerating ? 'Generating report...' : 'Generate Report'}
+                    </button>
+                    <div className="consultant-upload-hint">
+                      The report is built from the included files only. Files the Lambda has no
+                      parser for (Credits files, Delta Dental, NYP) are ignored here and affect
+                      the Master Dashboard only.
+                    </div>
+                  </div>
+
+                  {nIncluded > 0 && (
+                    <ul className="consultant-included-list">
+                      {keys.sort().map((k) => (
+                        <li key={k} className="consultant-included-item" title={k}>
+                          <span className="consultant-included-name">{k.split('/').pop()}</span>
+                          <span className="consultant-included-label">{classifyFile(k.split('/').pop() || '')}</span>
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
-                <div className="consultant-upload-actions">
-                  <input
-                    ref={consultantFileInputRef}
-                    type="file"
-                    multiple
-                    style={{ display: 'none' }}
-                    accept=".xlsx,.xls,.csv"
-                    onChange={(e) => { if (e.target.files) handleConsultantUpload(e.target.files); }}
-                  />
-                  <button
-                    className="consultant-primary-btn"
-                    onClick={() => consultantFileInputRef.current?.click()}
-                    disabled={consultantUploading || consultantGenerating}
-                  >
-                    {consultantUploading ? 'Uploading...' : consultantGenerating ? 'Generating report...' : 'Upload Files'}
-                  </button>
-                  <div className="consultant-upload-hint">
-                    Filenames must contain one of the required patterns (e.g. TPA_Cassena, PIOPAC, CoreChoice_Direct_T1)
-                  </div>
-                </div>
-
-                <div className="consultant-slot-grid">
-                  {consultantUploads.slots.map(s => (
-                    <div key={s.slot} className={`consultant-slot ${s.uploaded ? 'filled' : 'empty'}`}>
-                      <div className="consultant-slot-status">
-                        {s.uploaded ? (
-                          <span className="consultant-slot-check">✓</span>
-                        ) : (
-                          <span className="consultant-slot-x">—</span>
-                        )}
-                      </div>
-                      <div className="consultant-slot-body">
-                        <div className="consultant-slot-label">{s.label}</div>
-                        <div className="consultant-slot-substring">Match: <code>{s.slot}</code></div>
-                        {s.uploaded && (
-                          <div className="consultant-slot-filename" title={s.filename || ''}>
-                            {s.filename}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Loading spinner while report loads */}
             {consultantReportLoading && (
