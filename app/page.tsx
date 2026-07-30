@@ -2228,7 +2228,6 @@ export default function Dashboard() {
         .consultant-overwrite-banner { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 14px; background: rgba(245, 200, 110, 0.08); border: 1px solid rgba(245, 200, 110, 0.35); border-radius: 6px; color: #f5c86e; font-size: 13px; }
         .consultant-overwrite-icon { font-size: 16px; }
         .consultant-upload-actions { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
-        .consultant-upload-hint { color: rgba(255, 255, 255, 0.4); font-size: 12px; font-style: italic; }
         .consultant-included-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; }
         .consultant-included-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-radius: 8px; border: 1px solid rgba(80, 200, 120, 0.3); background: rgba(80, 200, 120, 0.06); min-width: 0; }
         .consultant-included-name { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 12px; color: #ffffff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3369,11 +3368,6 @@ export default function Dashboard() {
                     >
                       {consultantGenerating ? 'Generating report...' : 'Generate Report'}
                     </button>
-                    <div className="consultant-upload-hint">
-                      The report is built from the included files only. Files the Lambda has no
-                      parser for (Credits files, Delta Dental, NYP) are ignored here and affect
-                      the Master Dashboard only.
-                    </div>
                   </div>
 
                   {nIncluded > 0 && (
