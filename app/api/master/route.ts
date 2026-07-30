@@ -299,6 +299,33 @@ async function streamToBuffer(stream: any): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+async function loadIncludedKeys(): Promise<Set<string>> {
+  const included = new Set<string>();
+  let token: string | undefined = undefined;
+  do {
+    const cmd: ListObjectsV2Command = new ListObjectsV2Command({
+      Bucket: BUCKET,
+      Prefix: 'manifests/',
+      ContinuationToken: token,
+    });
+    const res = await s3.send(cmd);
+    for (const obj of res.Contents || []) {
+      if (!obj.Key || !obj.Key.endsWith('.json')) continue;
+      try {
+        const m = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: obj.Key }));
+        if (!m.Body) continue;
+        const text = (await streamToBuffer(m.Body as any)).toString('utf8');
+        const parsed = JSON.parse(text);
+        for (const k of parsed.included || []) included.add(k);
+      } catch (err) {
+        console.error(`Failed to read manifest ${obj.Key}:`, err);
+      }
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return included;
+}
+
 function parseCSV(text: string): { headers: string[]; rows: string[][] } {
   const lines: string[] = [];
   let current = '';
@@ -513,6 +540,7 @@ export async function GET() {
     // List S3 objects under the "carrier=" prefix only. This skips billing-sources/,
     // billing-reports/, billing-updates/, and any other non-carrier folder - which is
     // why files like Reconciliation_Output_<month>.xlsx don't show up as "unknown".
+    const includedKeys = await loadIncludedKeys();
     type FileInfo = { key: string; year: number; month: number; fileLabel: string };
     const files: FileInfo[] = [];
     let token: string | undefined = undefined;
@@ -525,6 +553,7 @@ export async function GET() {
       const res = await s3.send(cmd);
       for (const obj of res.Contents || []) {
         if (!obj.Key || obj.Key.endsWith('/')) continue;
+        if (!includedKeys.has(obj.Key)) continue;
         const lower = obj.Key.toLowerCase();
         if (!lower.endsWith('.csv') && !lower.endsWith('.xlsx') && !lower.endsWith('.xls')) continue;
         const filename = obj.Key.split('/').pop() || obj.Key;
