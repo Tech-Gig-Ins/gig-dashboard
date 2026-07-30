@@ -79,6 +79,15 @@ export async function POST(request: Request) {
     if (typeof included !== 'boolean') {
       return NextResponse.json({ error: 'included must be boolean' }, { status: 400 });
     }
+    // Auto-excluded types can never contribute to either calculation, so they
+    // must never enter a manifest. Removal stays allowed so an entry written
+    // before this guard existed can still be cleared.
+    if (included && /\.(pdf|zip)$/i.test(key)) {
+      return NextResponse.json(
+        { error: 'PDF and ZIP files cannot be included; they are excluded from all calculations' },
+        { status: 400 }
+      );
+    }
 
     const manifest = await loadManifest(month);
     const set = new Set(manifest.included);

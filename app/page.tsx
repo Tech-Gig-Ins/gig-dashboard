@@ -2589,8 +2589,16 @@ export default function Dashboard() {
                   const fileCount = Object.values(monthBlock.systems).reduce((sum, files) => sum + files.length, 0);
                   // Calendar month key for the inclusion manifest (monthBlock.month is zero-based).
                   const mfMonth = manifestMonthKey(monthBlock.year, monthBlock.month);
-                  const monthFileKeys = Object.values(monthBlock.systems).flat().map((f) => f.key);
-                  const nIncluded = monthFileKeys.filter((k) => isIncluded(mfMonth, k)).length;
+                  // .pdf/.zip can never contribute to either calculation, so they are
+                  // not offered to the bulk actions and don't count toward "all included".
+                  const includableFiles = Object.values(monthBlock.systems).flat().filter((f) => !isExcludedByExtension(f.filename));
+                  const monthFileKeys = includableFiles.map((f) => f.key);
+                  const allMonthKeys = Object.values(monthBlock.systems).flat().map((f) => f.key);
+                  // Eligible count drives "Include all"; the all-files count drives the
+                  // badge and "Exclude all", so a stray included .pdf is visible and clearable.
+                  const nIncludedEligible = monthFileKeys.filter((k) => isIncluded(mfMonth, k)).length;
+                  const nIncluded = allMonthKeys.filter((k) => isIncluded(mfMonth, k)).length;
+                  const nIncludable = monthFileKeys.length;
                   return (
                     <div key={mKey} className="month-block">
                       <h2 className="month-heading">
@@ -2603,14 +2611,14 @@ export default function Dashboard() {
                           <button
                             className="include-bulk-btn"
                             onClick={() => setIncludedBulk(mfMonth, monthFileKeys, true)}
-                            disabled={nIncluded === fileCount}
-                            title={`Include all ${fileCount} files in ${monthBlock.label}`}
+                            disabled={nIncludable === 0 || nIncludedEligible === nIncludable}
+                            title={`Include all ${nIncludable} eligible file${nIncludable !== 1 ? 's' : ''} in ${monthBlock.label}`}
                           >
                             Include all
                           </button>
                           <button
                             className="include-bulk-btn"
-                            onClick={() => setIncludedBulk(mfMonth, monthFileKeys, false)}
+                            onClick={() => setIncludedBulk(mfMonth, allMonthKeys, false)}
                             disabled={nIncluded === 0}
                             title={`Exclude all files in ${monthBlock.label}`}
                           >
@@ -2647,20 +2655,26 @@ export default function Dashboard() {
                                     {isExcludedByExtension(file.filename) && (
                                       <span className="file-item-excluded" title="Excluded from Master Dashboard analysis">EXCLUDED</span>
                                     )}
-                                    <button
-                                      className={`include-toggle ${isIncluded(mfMonth, file.key) ? 'on' : 'off'}`}
-                                      onClick={(e) => { e.stopPropagation(); toggleIncluded(mfMonth, file.key, !isIncluded(mfMonth, file.key)); }}
-                                      disabled={!!includeSaving[file.key] || !manifestMonthsLoaded.has(mfMonth)}
-                                      title={
-                                        isIncluded(mfMonth, file.key)
-                                          ? `Included in ${monthBlock.label} calculations. Click to exclude.`
-                                          : `Not counted anywhere. Click to include in ${monthBlock.label} calculations.`
-                                      }
-                                    >
-                                      {includeSaving[file.key]
-                                        ? '...'
-                                        : isIncluded(mfMonth, file.key) ? '✓ Included' : 'Include'}
-                                    </button>
+                                    {/* Auto-excluded types (.pdf/.zip) get no Include button: they
+                                        can never contribute to either calculation. The button still
+                                        renders if such a file is somehow already in the manifest, so
+                                        it can be removed rather than being stuck. */}
+                                    {(!isExcludedByExtension(file.filename) || isIncluded(mfMonth, file.key)) && (
+                                      <button
+                                        className={`include-toggle ${isIncluded(mfMonth, file.key) ? 'on' : 'off'}`}
+                                        onClick={(e) => { e.stopPropagation(); toggleIncluded(mfMonth, file.key, !isIncluded(mfMonth, file.key)); }}
+                                        disabled={!!includeSaving[file.key] || !manifestMonthsLoaded.has(mfMonth)}
+                                        title={
+                                          isIncluded(mfMonth, file.key)
+                                            ? `Included in ${monthBlock.label} calculations. Click to exclude.`
+                                            : `Not counted anywhere. Click to include in ${monthBlock.label} calculations.`
+                                        }
+                                      >
+                                        {includeSaving[file.key]
+                                          ? '...'
+                                          : isIncluded(mfMonth, file.key) ? '✓ Included' : 'Include'}
+                                      </button>
+                                    )}
                                     <span className="file-item-meta">{formatBytes(file.size)} · {formatDate(file.lastModified)}</span>
                                     <button
                                       className="download-btn"
