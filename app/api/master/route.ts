@@ -274,6 +274,7 @@ function buildGroup(
   employerNameIdx: number,
   employerIdx: number,
   l426ShopIdx: number,
+  clientGroupIdx: number = -1,
 ): string {
   const employerName = getCell(row, employerNameIdx);
   if (employerName) return employerName;
@@ -281,6 +282,9 @@ function buildGroup(
   if (employer) return employer;
   const l426Shop = getCell(row, l426ShopIdx);
   if (l426Shop) return l426Shop;
+  // Refresh exports carry the employer under 'Client Group'.
+  const clientGroup = getCell(row, clientGroupIdx);
+  if (clientGroup) return clientGroup;
   return '';
 }
 
@@ -472,14 +476,20 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
     }
 
     const subscriberIdx = findCol(headers, ['subscriber name', 'member name'], true);
-    const firstIdx = findCol(headers, ['first name'], true);
-    const lastIdx = findCol(headers, ['last name'], true);
+    // 'first' / 'last' (bare) are the Refresh export's headers. Matching is strict
+    // (exact equality after normalization), so these cannot collide with headers
+    // like 'First Seen' or 'Last Seen' in the consultant directory.
+    const firstIdx = findCol(headers, ['first name', 'first'], true);
+    const lastIdx = findCol(headers, ['last name', 'last'], true);
     const memberFirstIdx = findCol(headers, ['member first', 'member first name'], true);
     const memberLastIdx = findCol(headers, ['member last', 'member last name'], true);
 
     const employerNameIdx = findCol(headers, ['employer name'], true);
     const employerIdx = findCol(headers, ['employer'], true);
     const l426ShopIdx = findCol(headers, ['l426 shop', 'local 426 shop'], true);
+    // Refresh identifies the employer as 'Client Group' (or 'Group Name'), which
+    // none of the three lookups above cover, so its rows had no group either.
+    const clientGroupIdx = findCol(headers, ['client group', 'group name'], true);
 
     const planNameIdx = findCol(headers, ['plan name', 'class/plan', 'class plan']);
     const anthemIdIdx = findCol(headers, ['anthem id']);
@@ -500,7 +510,7 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
       const normalizedName = normalizeName(memberName);
       if (!normalizedName) continue;
 
-      const group = buildGroup(row, employerNameIdx, employerIdx, l426ShopIdx);
+      const group = buildGroup(row, employerNameIdx, employerIdx, l426ShopIdx, clientGroupIdx);
       const normalizedGroup = normalizeName(group);
 
       records.push({
