@@ -555,6 +555,7 @@ export default function Dashboard() {
   const [consultantReportLoading, setConsultantReportLoading] = useState(false);
   const [consultantGenerating, setConsultantGenerating] = useState(false);
   const [consultantOpError, setConsultantOpError] = useState<string>('');
+  const [consultantDownloading, setConsultantDownloading] = useState(false);
   const [consultantActiveReportSheet, setConsultantActiveReportSheet] = useState<string>('');
   const [consultantActiveDirectorySheet, setConsultantActiveDirectorySheet] = useState<string>('');
   const [showNewMonthDialog, setShowNewMonthDialog] = useState(false);
@@ -759,8 +760,38 @@ export default function Dashboard() {
     }
   }
 
-  async function handleDownload(fileKey: string, filename: string) {
+  // Per-consultant download. The route pulls the month's report from S3, strips
+  // every sheet except that consultant's tab, and streams it back, so the
+  // original formatting is preserved. Shared tabs (Unassigned, New/Dropped
+  // Companies, Summary, Notes) stay in the full workbook only.
+  async function downloadConsultantSheet(consultant: string) {
+    if (!consultantSelectedMonth) return;
+    setConsultantDownloading(true);
     try {
+      const url = `/api/consultant/download-sheet?month=${encodeURIComponent(consultantSelectedMonth)}`
+                + `&consultant=${encodeURIComponent(consultant)}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Download failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objUrl;
+      a.download = `${consultant} Report ${consultantSelectedMonth}.xlsx`.replace(/[\\/:*?"<>|]/g, '-');
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(objUrl);
+    } catch (e: any) {
+      setConsultantOpError(e.message || 'Download failed');
+    } finally {
+      setConsultantDownloading(false);
+    }
+  }
+
+  async function handleDownload(fileKey: string, filename: string) {    try {
       const res = await fetch(`/api/download?key=${encodeURIComponent(fileKey)}`);
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
@@ -1543,6 +1574,16 @@ export default function Dashboard() {
   }
 
   // Month-first ordering used by the All Info browse view. Newest month first.
+  // Consultant tab names for the download dropdown, taken from the generated
+  // report itself. Per-consultant tabs are the ones prefixed with the person
+  // emoji; everything else (Summary, Unassigned, New/Dropped Companies, the
+  // comparison tabs, Notes) is shared and only ships in the full workbook.
+  const consultantTabNames: string[] = (consultantReportView?.report?.sheets || [])
+    .map((sh: any) => String(sh?.name || ''))
+    .filter((n: string) => n.includes('\u{1F464}'))
+    .map((n: string) => n.replace(/\u{1F464}/gu, '').trim())
+    .filter(Boolean);
+
   const sortedMonthKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
 
   // Load the inclusion manifest for every month block currently on screen.
@@ -3321,26 +3362,41 @@ export default function Dashboard() {
                   + New Month
                 </button>
                 {consultantReportView?.report && (
-                  <button
-                    className="billing-download-btn"
-                    onClick={() => {
-                      const r = consultantReportView.report!;
-                      handleDownload(r.s3Key, r.filename);
-                      if (consultantReportView.directory) {
-                        // Small delay so both downloads fire cleanly in the same user gesture window
-                        const d = consultantReportView.directory;
-                        setTimeout(() => handleDownload(d.s3Key, d.filename), 300);
+                  <select
+                    className="consultant-month-select"
+                    value=""
+                    disabled={consultantDownloading}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      e.target.value = '';
+                      if (!v) return;
+                      if (v === '__ALL__') {
+                        const r = consultantReportView.report!;
+                        handleDownload(r.s3Key, r.filename);
+                        if (consultantReportView.directory) {
+                          // Small delay so both downloads fire cleanly in the same user gesture window
+                          const d = consultantReportView.directory;
+                          setTimeout(() => handleDownload(d.s3Key, d.filename), 300);
+                        }
+                      } else {
+                        downloadConsultantSheet(v);
                       }
                     }}
-                    title="Download both the report and the directory"
+                    title="Download the whole workbook, or one consultant's tab on its own"
+                    style={{ minWidth: 210 }}
                   >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 8, verticalAlign: '-2px' }}>
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                      <polyline points="7 10 12 15 17 10" />
-                      <line x1="12" y1="15" x2="12" y2="3" />
-                    </svg>
-                    Download Excel
-                  </button>
+                    <option value="">
+                      {consultantDownloading ? 'Preparing download...' : 'Download Excel'}
+                    </option>
+                    <option value="__ALL__">
+                      GWU Consultant Report {consultantSelectedMonth}
+                    </option>
+                    {consultantTabNames.map(name => (
+                      <option key={name} value={name}>
+                        {name} Report {consultantSelectedMonth}
+                      </option>
+                    ))}
+                  </select>
                 )}
               </div>
             </div>
