@@ -636,6 +636,10 @@ export default function Dashboard() {
   const [billingRefreshFile, setBillingRefreshFile] = useState<File | null>(null);
   const [billingSourcesUploading, setBillingSourcesUploading] = useState(false);
   const [billingSourcesError, setBillingSourcesError] = useState<string | null>(null);
+  // Report generation (invokes the reconcile-billing Lambda)
+  const [billingGenerating, setBillingGenerating] = useState(false);
+  const [billingGenerateError, setBillingGenerateError] = useState<string | null>(null);
+  const [billingGenerateResult, setBillingGenerateResult] = useState<string | null>(null);
 
   // Load the All Info files listing. Extracted from useEffect so we can refresh
   // it after new files are uploaded via the upload modal.
@@ -1354,6 +1358,39 @@ export default function Dashboard() {
     }
   }
 
+  // Invoke the reconcile-billing Lambda for the selected month, then refresh the
+  // view so the newly written report is picked up by /api/billing/report-file.
+  async function generateBillingReport(): Promise<boolean> {
+    if (!billingSelectedMonth) return false;
+    setBillingGenerating(true);
+    setBillingGenerateError(null);
+    setBillingGenerateResult(null);
+    try {
+      const res = await fetch('/api/billing/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month: billingSelectedMonth }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Generate failed (${res.status})`);
+      // The Lambda logs its own enrollment counts; surface them when present.
+      const bits: string[] = [];
+      if (typeof data.enrollments === 'number') bits.push(`${data.enrollments} enrollments`);
+      if (typeof data.matched === 'number') bits.push(`${data.matched} matched`);
+      if (typeof data.missing === 'number') bits.push(`${data.missing} missing`);
+      setBillingGenerateResult(
+        bits.length ? `Report generated: ${bits.join(', ')}` : 'Report generated.'
+      );
+      setBillingRefetchTick(t => t + 1);
+      return true;
+    } catch (e: any) {
+      setBillingGenerateError(e.message || 'Failed to generate report');
+      return false;
+    } finally {
+      setBillingGenerating(false);
+    }
+  }
+
   async function submitBillingSourcesUpload() {
     setBillingSourcesError(null);
     if (!billingCardConnectFile || !billingRefreshFile) {
@@ -1374,6 +1411,10 @@ export default function Dashboard() {
       setBillingRefreshFile(null);
       setShowBillingUploadModal(false);
       setBillingRefetchTick(t => t + 1);
+      // Uploading sources on its own produces no report, so run the
+      // reconciliation straight away. Any failure here is reported separately
+      // from the upload, which has already succeeded.
+      await generateBillingReport();
     } catch (e: any) {
       setBillingSourcesError(e.message || 'Upload failed');
     } finally {
@@ -2320,6 +2361,7 @@ export default function Dashboard() {
         .month-block { margin-bottom: 56px; }
         .month-heading { font-family: 'Fraunces', serif; font-size: 36px; font-weight: 500; color: #ffffff; margin: 0 0 24px; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 20px; }
         .month-heading::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(107, 164, 255, 0.4) 0%, transparent 100%); }
+        .billing-generate-ok { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 16px; padding: 10px 14px; background: rgba(80, 200, 120, 0.08); border: 1px solid rgba(80, 200, 120, 0.35); border-radius: 6px; color: #80d090; font-size: 13px; }
         .month-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); font-weight: 500; }
         .month-included-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(128, 208, 144, 0.9); font-weight: 500; white-space: nowrap; }
         .month-include-bulk { display: flex; gap: 8px; flex-shrink: 0; }
@@ -3634,6 +3676,14 @@ export default function Dashboard() {
                     >
                       Upload Files
                     </button>
+                    <button
+                      className="consultant-primary-btn"
+                      onClick={generateBillingReport}
+                      disabled={billingGenerating}
+                      title={`Re-run reconciliation for ${billingSelectedMonth} using the source files already in S3`}
+                    >
+                      {billingGenerating ? 'Generating...' : 'Generate Report'}
+                    </button>
                     {billingReport.sourceFile && (
                       <button
                         className="billing-download-btn"
@@ -3653,6 +3703,19 @@ export default function Dashboard() {
                     )}
                   </div>
                 </div>
+
+                {billingGenerateError && (
+                  <div className="consultant-error">
+                    {billingGenerateError}
+                    <button className="consultant-error-dismiss" onClick={() => setBillingGenerateError(null)}>Dismiss</button>
+                  </div>
+                )}
+                {billingGenerateResult && (
+                  <div className="billing-generate-ok">
+                    {billingGenerateResult}
+                    <button className="consultant-error-dismiss" onClick={() => setBillingGenerateResult(null)}>Dismiss</button>
+                  </div>
+                )}
 
                 {billingReport.sheets.length === 0 ? (
                   <div className="empty-state" style={{ padding: 32 }}>{billingReport.message || 'No sheets in this file.'}</div>
