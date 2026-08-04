@@ -1578,11 +1578,26 @@ export default function Dashboard() {
   // report itself. Per-consultant tabs are the ones prefixed with the person
   // emoji; everything else (Summary, Unassigned, New/Dropped Companies, the
   // comparison tabs, Notes) is shared and only ships in the full workbook.
-  const consultantTabNames: string[] = (consultantReportView?.report?.sheets || [])
-    .map((sh: any) => String(sh?.name || ''))
-    .filter((n: string) => n.includes('\u{1F464}'))
-    .map((n: string) => n.replace(/\u{1F464}/gu, '').trim())
-    .filter(Boolean);
+  //
+  // Every "FNA - <name>" tab collapses into a single "FNA" entry: downloading it
+  // yields one workbook holding all of those sheets under their original names.
+  const consultantTabNames: string[] = (() => {
+    const raw = (consultantReportView?.report?.sheets || [])
+      .map((sh: any) => String(sh?.name || ''))
+      .filter((n: string) => n.includes('\u{1F464}'))
+      .map((n: string) => n.replace(/\u{1F464}/gu, '').trim())
+      .filter(Boolean);
+    const out: string[] = [];
+    let fnaAdded = false;
+    for (const n of raw) {
+      if (/^FNA\s*-\s*\S/i.test(n)) {
+        if (!fnaAdded) { out.push('FNA'); fnaAdded = true; }
+      } else {
+        out.push(n);
+      }
+    }
+    return out.sort((a, b) => a.localeCompare(b));
+  })();
 
   const sortedMonthKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
 

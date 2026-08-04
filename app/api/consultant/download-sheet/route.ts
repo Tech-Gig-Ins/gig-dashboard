@@ -64,6 +64,14 @@ function tabKey(title: string): string {
   return String(title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// True for the individual FNA team tabs: "\u{1F464} FNA - HUND", "\u{1F464} FNA - KOBI", etc.
+// Deliberately does NOT match the shared "\u{1F536} FNA Full Report" tab, which
+// has no dash and belongs to the full workbook only.
+function isFnaTeamTab(title: string): boolean {
+  const bare = String(title || '').replace(/[^\x20-\x7E]/g, '').trim();
+  return /^FNA\s*-\s*\S/i.test(bare);
+}
+
 // Windows forbids \ / : * ? " < > | in filenames.
 function safeFilename(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
@@ -99,23 +107,41 @@ export async function GET(req: NextRequest) {
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buf as any);
 
-    const want = tabKey(consultant);
-    const target = wb.worksheets.find(ws => tabKey(ws.name) === want)
-                || wb.worksheets.find(ws => tabKey(ws.name).endsWith(want));
-    if (!target) {
-      return NextResponse.json({
-        error: `No tab for "${consultant}" in the ${month} report.`,
-        available: wb.worksheets.map(w => w.name),
-      }, { status: 404 });
+    // "FNA" is a team, not a person: it collects every "FNA - <name>" tab into a
+    // single workbook, each sheet keeping its original name. Every other value
+    // resolves to exactly one tab.
+    const isTeamFna = tabKey(consultant) === 'fna';
+
+    let keep: typeof wb.worksheets;
+    if (isTeamFna) {
+      keep = wb.worksheets.filter(ws => isFnaTeamTab(ws.name));
+      if (keep.length === 0) {
+        return NextResponse.json({
+          error: `No FNA team tabs in the ${month} report.`,
+          available: wb.worksheets.map(w => w.name),
+        }, { status: 404 });
+      }
+    } else {
+      const want = tabKey(consultant);
+      const target = wb.worksheets.find(ws => tabKey(ws.name) === want)
+                  || wb.worksheets.find(ws => tabKey(ws.name).endsWith(want));
+      if (!target) {
+        return NextResponse.json({
+          error: `No tab for "${consultant}" in the ${month} report.`,
+          available: wb.worksheets.map(w => w.name),
+        }, { status: 404 });
+      }
+      keep = [target];
     }
 
-    // Remove every other sheet. Collect ids first: removing while iterating
+    // Remove everything else. Collect ids first: removing while iterating
     // mutates the worksheets array underneath us.
-    const doomed = wb.worksheets.filter(ws => ws.id !== target.id).map(ws => ws.id);
+    const keepIds = new Set(keep.map(ws => ws.id));
+    const doomed = wb.worksheets.filter(ws => !keepIds.has(ws.id)).map(ws => ws.id);
     for (const id of doomed) wb.removeWorksheet(id);
 
     const out = await wb.xlsx.writeBuffer();
-    const filename = safeFilename(`${consultant} Report ${month}.xlsx`);
+    const filename = safeFilename(`${isTeamFna ? 'FNA' : consultant} Report ${month}.xlsx`);
 
     return new NextResponse(out as any, {
       status: 200,
