@@ -556,6 +556,13 @@ export default function Dashboard() {
   const [consultantGenerating, setConsultantGenerating] = useState(false);
   const [consultantOpError, setConsultantOpError] = useState<string>('');
   const [consultantDownloading, setConsultantDownloading] = useState(false);
+
+  // Signed-in identity, from /api/auth/me. Null until the first fetch resolves.
+  type AuthUser = {
+    authenticated: boolean; email: string; firstName: string;
+    lastName: string; fullName: string; isAdmin: boolean;
+  };
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [consultantActiveReportSheet, setConsultantActiveReportSheet] = useState<string>('');
   const [consultantActiveDirectorySheet, setConsultantActiveDirectorySheet] = useState<string>('');
   const [showNewMonthDialog, setShowNewMonthDialog] = useState(false);
@@ -667,6 +674,12 @@ export default function Dashboard() {
   useEffect(() => {
     setMounted(true);
     loadAllFilesData();
+    // Who am I. A 401 here simply means not signed in; proxy.ts will already
+    // have redirected the browser, so there is nothing to handle.
+    fetch('/api/auth/me')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (d?.authenticated) setAuthUser(d); })
+      .catch(() => {});
   }, []);
 
   // ==================== INCLUSION MANIFESTS ====================
@@ -2082,6 +2095,14 @@ export default function Dashboard() {
         .brand { display: flex; align-items: center; gap: 14px; }
         .brand-mark { width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg, #4d8eff 0%, #1546c4 100%); display: flex; align-items: center; justify-content: center; font-family: 'Fraunces', serif; font-weight: 700; font-size: 18px; box-shadow: 0 8px 24px rgba(77, 142, 255, 0.4); }
         .brand-text { font-size: 13px; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(255, 255, 255, 0.7); font-weight: 500; }
+        .user-chip { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; padding-left: 20px; border-left: 1px solid rgba(255,255,255,0.12); }
+        .user-chip-main { display: flex; align-items: center; gap: 8px; }
+        .user-chip-name { font-size: 13px; letter-spacing: 0.04em; text-transform: none; color: #ffffff; font-weight: 500; }
+        .user-chip-email { font-size: 11px; letter-spacing: 0.02em; text-transform: none; color: rgba(255,255,255,0.4); }
+        .user-badge-admin { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: #80d090; background: rgba(80,200,120,0.12); border: 1px solid rgba(80,200,120,0.4); padding: 2px 7px; border-radius: 3px; }
+        .user-badge-viewer { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: rgba(107,164,255,0.9); background: rgba(107,164,255,0.1); border: 1px solid rgba(107,164,255,0.35); padding: 2px 7px; border-radius: 3px; }
+        .signout-btn { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.55); border: 1px solid rgba(255,255,255,0.16); border-radius: 6px; padding: 6px 14px; text-decoration: none; transition: all 0.15s ease; white-space: nowrap; }
+        .signout-btn:hover { color: #ffffff; border-color: rgba(255,136,136,0.5); background: rgba(255,136,136,0.08); }
         .header-meta { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(255, 255, 255, 0.4); display: flex; gap: 24px; align-items: center; }
         .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 12px rgba(74, 222, 128, 0.6); animation: pulse 2s ease-in-out infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
@@ -2514,6 +2535,25 @@ export default function Dashboard() {
         <div className="header-meta">
           <span className="status-dot" />
           <span>System Operational</span>
+
+          {/* Signed-in identity. Sourced from /api/auth/me, which reads the
+              verified id token server-side. The ADMIN badge is presentation
+              only: every admin route independently enforces requireAdmin(). */}
+          {authUser?.authenticated && (
+            <div className="user-chip">
+              <div className="user-chip-main">
+                <span className="user-chip-name">{authUser.fullName}</span>
+                {authUser.isAdmin && <span className="user-badge-admin">Admin</span>}
+                {!authUser.isAdmin && <span className="user-badge-viewer">Viewer</span>}
+              </div>
+              <div className="user-chip-email">{authUser.email}</div>
+            </div>
+          )}
+          {authUser?.authenticated && (
+            <a className="signout-btn" href="/api/auth/logout" title="Sign out of the dashboard">
+              Sign out
+            </a>
+          )}
         </div>
       </header>
 
