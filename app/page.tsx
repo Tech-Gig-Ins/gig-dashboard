@@ -563,6 +563,9 @@ export default function Dashboard() {
     lastName: string; fullName: string; isAdmin: boolean;
   };
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  // Nothing renders until the session is confirmed, so a signed-out visitor
+  // never sees dashboard chrome or triggers data fetches.
+  const [authChecked, setAuthChecked] = useState(false);
   const [consultantActiveReportSheet, setConsultantActiveReportSheet] = useState<string>('');
   const [consultantActiveDirectorySheet, setConsultantActiveDirectorySheet] = useState<string>('');
   const [showNewMonthDialog, setShowNewMonthDialog] = useState(false);
@@ -671,15 +674,40 @@ export default function Dashboard() {
       });
   }
 
+  // Catch a session that expires mid-use. Any API call answering 401 means the
+  // token is gone or expired, so send the browser to sign in rather than
+  // leaving a dashboard full of failed requests on screen.
+  useEffect(() => {
+    const original = window.fetch;
+    window.fetch = async (...args: Parameters<typeof fetch>) => {
+      const res = await original(...args);
+      const url = typeof args[0] === 'string' ? args[0] : (args[0] as Request)?.url || '';
+      if (res.status === 401 && url.includes('/api/') && !url.includes('/api/auth/')) {
+        window.location.href = '/api/auth/login';
+      }
+      return res;
+    };
+    return () => { window.fetch = original; };
+  }, []);
+
   useEffect(() => {
     setMounted(true);
     loadAllFilesData();
-    // Who am I. A 401 here simply means not signed in; proxy.ts will already
-    // have redirected the browser, so there is nothing to handle.
+    // Who am I. Do NOT assume proxy.ts already handled this: when the page is
+    // served from the CDN as static HTML, proxy never ran for this request.
+    // A 401 here therefore means "signed out but still looking at the shell",
+    // and the only correct response is to send the browser to sign in.
     fetch('/api/auth/me')
       .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (d?.authenticated) setAuthUser(d); })
-      .catch(() => {});
+      .then(d => {
+        if (d?.authenticated) {
+          setAuthUser(d);
+          setAuthChecked(true);
+        } else {
+          window.location.href = '/api/auth/login';
+        }
+      })
+      .catch(() => { window.location.href = '/api/auth/login'; });
   }, []);
 
   // ==================== INCLUSION MANIFESTS ====================
@@ -1876,6 +1904,23 @@ export default function Dashboard() {
     }
     matches.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
     return matches;
+  }
+
+  // Hold everything until the session is confirmed. A signed-out visitor is
+  // already being redirected by the effect above; rendering dashboard chrome in
+  // the meantime is what made sign-out look like a broken page full of 401s
+  // rather than a logout.
+  if (!authChecked) {
+    return (
+      <main style={{
+        minHeight: '100vh', display: 'flex', alignItems: 'center',
+        justifyContent: 'center', background: '#0a1628', color: 'rgba(255,255,255,0.5)',
+        fontFamily: "'Inter', system-ui, sans-serif", fontSize: 13,
+        letterSpacing: '0.14em', textTransform: 'uppercase',
+      }}>
+        Checking access...
+      </main>
+    );
   }
 
   return (
