@@ -97,8 +97,10 @@ export async function GET(req: NextRequest) {
     res.cookies.set(ID_COOKIE, tokens.id_token, sessionCookieOptions(ttl));
     res.cookies.set(ACCESS_COOKIE, tokens.access_token, sessionCookieOptions(ttl));
     if (tokens.refresh_token) {
-      // Refresh token validity is set to 8 hours on the app client.
-      res.cookies.set(REFRESH_COOKIE, tokens.refresh_token, sessionCookieOptions(8 * 3600));
+      // Matches --refresh-token-validity 7 days on the app client. This is what
+      // keeps the user signed in for a week: /api/auth/refresh trades it for
+      // fresh 60-minute tokens whenever they expire.
+      res.cookies.set(REFRESH_COOKIE, tokens.refresh_token, sessionCookieOptions(7 * 24 * 3600));
     }
     clearFlowCookies(res);
     return res;

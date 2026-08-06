@@ -679,10 +679,30 @@ export default function Dashboard() {
   // leaving a dashboard full of failed requests on screen.
   useEffect(() => {
     const original = window.fetch;
+    let refreshing: Promise<boolean> | null = null;
+
+    // Renew once, sharing the attempt across concurrent 401s so a page issuing
+    // several requests does not fire several refreshes.
+    const tryRefresh = (): Promise<boolean> => {
+      if (!refreshing) {
+        refreshing = original('/api/auth/refresh', { method: 'POST' })
+          .then(r => r.ok)
+          .catch(() => false)
+          .finally(() => { setTimeout(() => { refreshing = null; }, 1000); });
+      }
+      return refreshing;
+    };
+
     window.fetch = async (...args: Parameters<typeof fetch>) => {
       const res = await original(...args);
       const url = typeof args[0] === 'string' ? args[0] : (args[0] as Request)?.url || '';
-      if (res.status === 401 && url.includes('/api/') && !url.includes('/api/auth/')) {
+      const isApi = url.includes('/api/') && !url.includes('/api/auth/');
+
+      if (res.status === 401 && isApi) {
+        // The 60-minute id token has expired. Trade the 7-day refresh token for
+        // a new one and retry, so the user is not sent back to Google.
+        const ok = await tryRefresh();
+        if (ok) return original(...args);
         window.location.href = '/api/auth/login';
       }
       return res;
