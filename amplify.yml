@@ -1,0 +1,31 @@
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - npm ci
+    build:
+      commands:
+        # --- environment variable diagnosis + fix ---------------------------
+        # Amplify exposes console variables to the BUILD shell. For Next.js SSR
+        # they do not always survive into the server runtime, which is why
+        # COGNITO_* came back undefined while MY_AWS_ACCESS_KEY_ID (set earlier
+        # and baked in by an older build) was present.
+        #
+        # This prints which of them the build can see, then writes them into
+        # .env.production, which Next.js reads at runtime.
+        #
+        # Only names are printed, never values, so the build log stays clean.
+        - echo "=== env vars visible to the build ==="
+        - env | grep -E '^(COGNITO_|APP_URL|ALLOWED_EMAIL_DOMAIN|ADMIN_EMAILS|MY_AWS_)' | cut -d= -f1 | sort || echo "NONE MATCHED - the variables are not reaching the build either"
+        - echo "====================================="
+        - env | grep -E '^(COGNITO_|APP_URL=|ALLOWED_EMAIL_DOMAIN=|ADMIN_EMAILS=)' >> .env.production || true
+        - npm run build
+  artifacts:
+    baseDirectory: .next
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - node_modules/**/*
+      - .next/cache/**/*
