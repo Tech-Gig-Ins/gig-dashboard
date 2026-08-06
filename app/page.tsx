@@ -621,10 +621,6 @@ export default function Dashboard() {
   const [billingError, setBillingError] = useState<string | null>(null);
   const [billingActiveSheet, setBillingActiveSheet] = useState<string>('');
   // Approval passcode modal
-  const [approvalModalOpen, setApprovalModalOpen] = useState(false);
-  const [approvalTargetKey, setApprovalTargetKey] = useState<string | null>(null);
-  const [approvalTargetFilename, setApprovalTargetFilename] = useState<string | null>(null);
-  const [approvalPasscode, setApprovalPasscode] = useState('');
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
 
@@ -1397,55 +1393,30 @@ export default function Dashboard() {
   }, [activeTab, consultantSelectedMonth]);
 
   // ==================== APPROVAL FLOW ====================
-  function openApprovalModal(u: BillingUpdate) {
-    if (!u.s3Key) return;
-    setApprovalTargetKey(u.s3Key);
-    setApprovalTargetFilename(u.filename || u.s3Key.split('/').pop() || null);
-    setApprovalPasscode('');
-    setApprovalError(null);
-    setApprovalModalOpen(true);
-  }
-  function closeApprovalModal() {
-    if (approvalSubmitting) return; // don't close mid-submit
-    setApprovalModalOpen(false);
-    setApprovalTargetKey(null);
-    setApprovalTargetFilename(null);
-    setApprovalPasscode('');
-    setApprovalError(null);
-  }
-  async function submitApproval() {
-    if (!approvalTargetKey) {
-      setApprovalError('No file selected');
-      return;
-    }
-    if (!approvalPasscode) {
-      setApprovalError('Enter the passcode');
-      return;
-    }
+  // One click, no passcode. Identity is the control now: /api/billing/approve
+  // calls requireAdmin(), so only a signed-in admin can succeed regardless of
+  // what the UI shows.
+  async function approveFile(key: string) {
+    if (!key || approvalSubmitting) return;
     setApprovalSubmitting(true);
     setApprovalError(null);
     try {
       const res = await fetch('/api/billing/approve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: approvalTargetKey, passcode: approvalPasscode, month: billingSelectedMonth }),
+        body: JSON.stringify({ key, month: billingSelectedMonth }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         setApprovalError(body.error || `Approval failed (${res.status})`);
-        setApprovalSubmitting(false);
         return;
       }
-      // Success - close modal, force refetch of the sheet viewer
-      setApprovalSubmitting(false);
-      setApprovalModalOpen(false);
-      setApprovalTargetKey(null);
-      setApprovalTargetFilename(null);
-      setApprovalPasscode('');
+      // Force the sheet viewer to reload with the newly approved file.
       setBillingReport(null);
       setBillingRefetchTick(t => t + 1);
     } catch (err: any) {
       setApprovalError(err.message || 'Network error');
+    } finally {
       setApprovalSubmitting(false);
     }
   }
@@ -4006,15 +3977,20 @@ export default function Dashboard() {
                                     >
                                       ✓ Approved
                                     </span>
-                                  ) : (
+                                  ) : authUser?.isAdmin ? (
+                                    /* Admins only. The server enforces this too
+                                       (requireAdmin on /api/billing/approve);
+                                       hiding the button is just so viewers are
+                                       not shown a control they cannot use. */
                                     <button
                                       className="update-approve-btn"
-                                      onClick={() => openApprovalModal(u)}
-                                      title="Approve this file to replace the display above (requires passcode)"
+                                      onClick={() => u.s3Key && approveFile(u.s3Key)}
+                                      disabled={approvalSubmitting}
+                                      title="Approve this file to replace the display above"
                                     >
-                                      Approve
+                                      {approvalSubmitting ? 'Approving...' : 'Approve'}
                                     </button>
-                                  )}
+                                  ) : null}
                                 </div>
                               )}
                             </div>
@@ -4175,40 +4151,6 @@ export default function Dashboard() {
       </div>
 
       {/* APPROVAL PASSCODE MODAL - Billing tab, rendered at root level */}
-      {approvalModalOpen && (
-        <>
-          <div className="upload-modal-overlay" onClick={closeApprovalModal} />
-          <div className="approval-modal">
-            <div className="approval-modal-header">
-              <h3>Approve File</h3>
-              <button className="close-btn" onClick={closeApprovalModal}>Close</button>
-            </div>
-            <div className="approval-modal-body">
-              <p className="approval-modal-info">
-                Approving <strong>{approvalTargetFilename || 'this file'}</strong> will replace the file currently displayed at the top of the Billing tab.
-              </p>
-              <label className="approval-modal-label">Passcode</label>
-              <input
-                type="password"
-                className="approval-passcode-input"
-                value={approvalPasscode}
-                onChange={e => { setApprovalPasscode(e.target.value); setApprovalError(null); }}
-                onKeyDown={e => { if (e.key === 'Enter' && !approvalSubmitting) submitApproval(); }}
-                autoFocus
-                placeholder="Enter passcode..."
-                disabled={approvalSubmitting}
-              />
-              {approvalError && <div className="approval-error">{approvalError}</div>}
-            </div>
-            <div className="approval-modal-footer">
-              <button className="close-btn" onClick={closeApprovalModal} disabled={approvalSubmitting}>Cancel</button>
-              <button className="approval-submit-btn" onClick={submitApproval} disabled={approvalSubmitting}>
-                {approvalSubmitting ? 'Approving...' : 'Approve'}
-              </button>
-            </div>
-          </div>
-        </>
-      )}
 
       {/* UPLOAD FILES MODAL - rendered at root level so it's available from any tab */}
       {uploadModalOpen && (

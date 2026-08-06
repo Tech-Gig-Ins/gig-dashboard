@@ -17,8 +17,12 @@ export async function GET(req: NextRequest) {
 
   const logout = new URL(`${COGNITO_DOMAIN}/logout`);
   logout.searchParams.set('client_id', CLIENT_ID);
-  // Must exactly match a registered logout URL on the app client.
-  logout.searchParams.set('logout_uri', `${origin.replace(/\/$/, '')}/`);
+  // Land on /signed-out, NOT '/'. proxy.ts treats '/' as protected, so
+  // returning there would immediately redirect to login, and because Cognito
+  // logout does not end the Google session Google would silently sign the user
+  // straight back in. /signed-out is public, so the user stays signed out.
+  // This URL must be registered in the app client's --logout-urls.
+  logout.searchParams.set('logout_uri', `${origin.replace(/\/$/, '')}/signed-out`);
 
   const res = NextResponse.redirect(logout.toString());
   for (const name of [ID_COOKIE, ACCESS_COOKIE, REFRESH_COOKIE, 'gwu_pkce', 'gwu_state', 'gwu_next']) {
