@@ -1,8 +1,8 @@
 // app/api/billing/approve/route.ts
 //
-// POST body: { month: "July 2026", key: "billing-updates/2026-07/files/...", passcode: "AndrewGig" }
+// POST body: { month: "July 2026", key: "billing-updates/2026-07/files/..." }
 //
-// Validates the passcode server-side and, on success, writes an approved.json
+// Requires an authenticated admin (see lib/auth.ts), then writes
 // pointer for the given month to s3://.../billing-updates/{YYYY-MM}/approved.json.
 // The next GET on /api/billing/report-file?month=<same month> will surface
 // that file as the displayed one for that month.
@@ -10,9 +10,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
+import { requireAdmin } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
-const REQUIRED_PASSCODE = 'AndrewGig';
 
 const s3 = new S3Client({
   region: REGION,
@@ -34,16 +34,21 @@ function monthToPrefix(label: string): string | null {
 }
 
 export async function POST(req: NextRequest) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAdmin(req);
+  if (gate instanceof NextResponse) return gate;
+
   try {
     const body = await req.json().catch(() => ({}));
     const key = typeof body.key === 'string' ? body.key.trim() : '';
-    const passcode = typeof body.passcode === 'string' ? body.passcode : '';
     const month = typeof body.month === 'string' ? body.month : '';
 
     if (!key) return NextResponse.json({ error: 'key is required' }, { status: 400 });
-    if (passcode !== REQUIRED_PASSCODE) {
-      return NextResponse.json({ error: 'Incorrect passcode' }, { status: 403 });
-    }
+    // The shared passcode is gone: requireAdmin() above already proved this
+    // is a named admin, which is also what makes the CloudTrail and app logs
+    // meaningful. `gate` is the verified Session here.
+    console.log(`[billing/approve] ${gate.email} approving ${key} for ${month}`);
     const prefix = monthToPrefix(month);
     if (!prefix) {
       return NextResponse.json(

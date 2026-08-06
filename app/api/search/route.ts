@@ -7,6 +7,7 @@ import { NextResponse } from 'next/server';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import * as XLSX from 'xlsx';
 
+import { requireAuth } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 
@@ -338,6 +339,11 @@ async function searchFile(key: string, query: string): Promise<MatchResult | nul
 }
 
 export async function GET(request: Request) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAuth(request);
+  if (gate instanceof NextResponse) return gate;
+
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
 

@@ -18,6 +18,7 @@ import { NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { randomUUID } from 'crypto';
 
+import { requireAdmin, requireAuth } from '@/lib/auth';
 const s3 = new S3Client({
   region: process.env.MY_AWS_REGION || 'us-east-1',
   credentials: {
@@ -92,6 +93,11 @@ function safeFilename(name: string): string {
 }
 
 export async function GET(request: Request) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAuth(request);
+  if (gate instanceof NextResponse) return gate;
+
   try {
     if (!BUCKET) {
       return NextResponse.json({ error: 'S3_RAW_BUCKET not configured' }, { status: 500 });
@@ -114,6 +120,11 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAdmin(request);
+  if (gate instanceof NextResponse) return gate;
+
   try {
     if (!BUCKET) {
       return NextResponse.json({ error: 'S3_RAW_BUCKET not configured' }, { status: 500 });

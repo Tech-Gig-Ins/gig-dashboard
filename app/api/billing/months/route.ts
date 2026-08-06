@@ -9,6 +9,7 @@
 import { NextResponse } from 'next/server';
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
 
+import { requireAuth } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 
@@ -45,7 +46,12 @@ function reconFilenameToPrefix(filename: string): string | null {
   return null;
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAuth(req);
+  if (gate instanceof NextResponse) return gate;
+
   try {
     // Aggregate per YYYY-MM prefix
     type MonthInfo = { prefix: string; hasReport: boolean; hasChat: boolean; latestMod: number };

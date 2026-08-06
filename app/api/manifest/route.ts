@@ -7,6 +7,7 @@
 import { NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 
+import { requireAdmin, requireAuth } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 
@@ -53,6 +54,11 @@ async function loadManifest(month: string): Promise<Manifest> {
 }
 
 export async function GET(request: Request) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAuth(request);
+  if (gate instanceof NextResponse) return gate;
+
   const { searchParams } = new URL(request.url);
   const month = searchParams.get('month');
   if (!validMonth(month)) {
@@ -67,6 +73,11 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAdmin(request);
+  if (gate instanceof NextResponse) return gate;
+
   try {
     const body = await request.json();
     const { month, key, included } = body || {};

@@ -25,6 +25,7 @@ import { NextResponse } from 'next/server';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import * as XLSX from 'xlsx';
 
+import { requireAuth } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 
@@ -545,7 +546,12 @@ function identityKey(record: { normalizedName: string; file: string; normalizedG
 }
 
 // ========== Main handler ==========
-export async function GET() {
+export async function GET(req: Request) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAuth(req);
+  if (gate instanceof NextResponse) return gate;
+
   try {
     // List S3 objects under the "carrier=" prefix only. This skips billing-sources/,
     // billing-reports/, billing-updates/, and any other non-carrier folder - which is

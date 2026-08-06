@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import ExcelJS from 'exceljs';
 
+import { requireAuth } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 
@@ -78,6 +79,11 @@ function safeFilename(name: string): string {
 }
 
 export async function GET(req: NextRequest) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAuth(req);
+  if (gate instanceof NextResponse) return gate;
+
   const { searchParams } = new URL(req.url);
   const month = searchParams.get('month') || '';
   const consultant = searchParams.get('consultant') || '';

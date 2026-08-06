@@ -7,6 +7,7 @@
 // matching files (with different descriptors like Dental / Medical) stay untouched.
 
 import { NextRequest, NextResponse } from 'next/server';
+import { requireAdmin } from '@/lib/auth';
 import {
   S3Client,
   PutObjectCommand,
@@ -170,6 +171,11 @@ function contentTypeFor(ext: string): string {
 }
 
 export async function POST(req: NextRequest) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAdmin(req);
+  if (gate instanceof NextResponse) return gate;
+
   try {
     const formData = await req.formData();
     const file = formData.get('file');

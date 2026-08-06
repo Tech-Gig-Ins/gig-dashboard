@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 
+import { requireAdmin } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 const FUNCTION_NAME = process.env.CONSULTANT_LAMBDA_NAME || 'consultant-report-lambda';
@@ -36,6 +37,11 @@ function prevMonthLabel(curr: string): string | null {
 }
 
 export async function POST(req: NextRequest) {
+  // Auth boundary. proxy.ts only does an optimistic cookie check;
+  // this is what actually verifies the token and role.
+  const gate = await requireAdmin(req);
+  if (gate instanceof NextResponse) return gate;
+
   try {
     const body = await req.json().catch(() => ({}));
     const curr_month: string = body.curr_month || '';
