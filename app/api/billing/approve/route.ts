@@ -6,6 +6,16 @@
 // pointer for the given month to s3://.../billing-updates/{YYYY-MM}/approved.json.
 // The next GET on /api/billing/report-file?month=<same month> will surface
 // that file as the displayed one for that month.
+//
+// DELETE ?month=July%202026
+//   Clears the override so the month falls back to the algorithm-generated
+//   Reconciliation_Output_<Month>_<Year>.xlsx.
+//
+//   It writes { approvedKey: null } rather than deleting approved.json. The
+//   dashboard IAM user has s3:DeleteObject on billing-sources/* only, not on
+//   billing-updates/*, so an actual delete would 403. report-file already
+//   treats a non-string approvedKey as "no override", so this is equivalent
+//   and needs no extra permission.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
@@ -70,6 +80,41 @@ export async function POST(req: NextRequest) {
   } catch (err: any) {
     console.error('approve error:', err);
     return NextResponse.json({ error: err.message || 'Approval failed' }, { status: 500 });
+  }
+}
+
+// Reset the month back to the generated reconciliation output.
+export async function DELETE(req: NextRequest) {
+  const gate = await requireAdmin(req);
+  if (gate instanceof NextResponse) return gate;
+
+  try {
+    const month = req.nextUrl.searchParams.get('month') || '';
+    const prefix = monthToPrefix(month);
+    if (!prefix) {
+      return NextResponse.json(
+        { error: `Invalid month "${month}". Expected format: "July 2026".` },
+        { status: 400 }
+      );
+    }
+
+    const jsonKey = `billing-updates/${prefix}/approved.json`;
+    const bodyStr = JSON.stringify(
+      { approvedKey: null, clearedAt: new Date().toISOString(), clearedBy: gate.email },
+      null, 2
+    );
+    await s3.send(new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: jsonKey,
+      Body: bodyStr,
+      ContentType: 'application/json',
+    }));
+
+    console.log(`[billing/approve] ${gate.email} reset ${month} to the generated report`);
+    return NextResponse.json({ ok: true, month, monthPrefix: prefix, approvedKey: null });
+  } catch (err: any) {
+    console.error('approve reset error:', err);
+    return NextResponse.json({ error: err.message || 'Reset failed' }, { status: 500 });
   }
 }
 
