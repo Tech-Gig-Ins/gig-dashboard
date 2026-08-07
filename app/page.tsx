@@ -595,7 +595,7 @@ export default function Dashboard() {
     creditFees: number | null; nypWire: number | null;
   };
   type WelfareResp = {
-    month: string; monthPrefix: string;
+    month: string; monthPrefix: string; creditMonth?: string;
     rows: WelfareRow[];
     totals: Record<string, number>;
     unmapped: string[];
@@ -657,9 +657,10 @@ export default function Dashboard() {
     body.push(['TOTAL', t.amount, t.enrolled, t.capFee, t.creditAmount, t.creditCount, t.creditFees, t.nypWire]);
 
     const aoa: any[][] = [
-      [`Wire Payments to NY Practice - ${welfareData.month}`], [],
-      ['Remittances come only from files Included in All Info for this month.'],
-      ['Credits come from any file dated to this month, included or not (.pdf/.zip excluded).'],
+      [`Wire Payments to NY Practice - ${welfareData.month}`],
+      [`Remittances: ${welfareData.month}   |   Credits: ${welfareData.creditMonth || ''}`], [],
+      ['Remittances: files Included in All Info for this month.'],
+      [`Credits: PRIOR month (${welfareData.creditMonth || 'previous month'}), any Include status, .pdf/.zip excluded.`],
       ['Remittance Amount sums every row. Enrolled counts distinct members after de-duplication.'],
       ['Cap Fee = Enrolled x fee rate. Credit Fees = Credit Count x fee rate (raw rows).'],
       ['NYP Wire = Remittance Amount - GIG Cap Fee - Credit Amount + Credit Fees.'],
@@ -3945,7 +3946,7 @@ export default function Dashboard() {
             <div className="consultant-header">
               <div>
                 <h2 className="consultant-title">Wire Payments to NY Practice</h2>
-                <div className="consultant-sub">{welfareMonth || 'Select a month'}</div>
+                <div className="consultant-sub">{welfareMonth || 'Select a month'}{welfareData?.creditMonth ? ` · credits from ${welfareData.creditMonth}` : ''}</div>
               </div>
               <div className="consultant-header-actions">
                 <select
@@ -3970,7 +3971,8 @@ export default function Dashboard() {
             <div className="welfare-notes">
               <div className="welfare-notes-title">How these figures are calculated</div>
               <ul>
-                <li><strong>Which files are used.</strong> Remittances are taken only from files <strong>Included</strong> in the All Info tab for this month. Credits are taken from <strong>any</strong> file dated to this month regardless of Include status, except auto-excluded types (.pdf and .zip).</li>
+                <li><strong>Which files are used.</strong> Remittances are taken only from files <strong>Included</strong> in the All Info tab for <strong>this</strong> month. Credits are taken from the <strong>previous</strong> month, from <strong>any</strong> file regardless of Include status, except auto-excluded types (.pdf and .zip).</li>
+                <li><strong>Why credits are a month behind.</strong> Remittances cover the current coverage month; credits cover the prior work period. So an August wire pairs August remittances with July credits.</li>
                 <li><strong>Why the two rules differ.</strong> Some carriers ship several remittance files for one month; Cassena has Invoice, Vision and the main remittance. Inclusion is what identifies the correct one. Credits are often left un-included so they do not disturb the Consultant Report, so requiring inclusion would zero them out.</li>
                 <li><strong>Month matching</strong> reads the month and year from the filename, the same way the All Info tab groups files.</li>
                 <li><strong>Remittance Amount</strong> sums the amount column across <strong>every row</strong> of the remittance file. A member on two plans pays two premiums, so this is deliberately not de-duplicated.</li>

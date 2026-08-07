@@ -271,6 +271,14 @@ export async function GET(req: NextRequest) {
     const targetMonth = parseInt(mm, 10) - 1;
     const targetYear = parseInt(prefix.split('-')[0], 10);
 
+    // Credits come from the PRIOR month: remittances cover the current coverage
+    // month while credits cover the prior work period. For August 2026 the
+    // credit files are July 2026's.
+    const prevDate = new Date(targetYear, targetMonth - 1, 1);
+    const prevYear = prevDate.getFullYear();
+    const prevMonth = prevDate.getMonth();
+    const prevLabel = `${MONTH_NAMES[prevMonth]} ${prevYear}`;
+
     let includedKeys = new Set<string>();
     try {
       const m = await s3.send(new GetObjectCommand({
@@ -305,6 +313,10 @@ export async function GET(req: NextRequest) {
       const d = detectMonthYear(k.split('/').pop() || '');
       return d && d.year === targetYear && d.month === targetMonth;
     });
+    const prevMonthFiles = keys.filter(k => {
+      const d = detectMonthYear(k.split('/').pop() || '');
+      return d && d.year === prevYear && d.month === prevMonth;
+    });
 
     if (monthFiles.length === 0) {
       return NextResponse.json({
@@ -317,15 +329,20 @@ export async function GET(req: NextRequest) {
     const remCandidates = new Map<string, string[]>();
     const credByLabel = new Map<string, string>();
 
+    // Remittances: this month, included files only.
     for (const key of monthFiles) {
       const label = classify(key.split('/').pop() || '');
-      if (label === 'unknown') continue;
-      if (label.toLowerCase().includes('credits')) {
-        if (!credByLabel.has(label)) credByLabel.set(label, key);
-      } else if (includedKeys.has(key)) {
-        remCandidates.set(label, [...(remCandidates.get(label) || []), key]);
-        if (!remByLabel.has(label)) remByLabel.set(label, key);
-      }
+      if (label === 'unknown' || label.toLowerCase().includes('credits')) continue;
+      if (!includedKeys.has(key)) continue;
+      remCandidates.set(label, [...(remCandidates.get(label) || []), key]);
+      if (!remByLabel.has(label)) remByLabel.set(label, key);
+    }
+
+    // Credits: PRIOR month, any Include status.
+    for (const key of prevMonthFiles) {
+      const label = classify(key.split('/').pop() || '');
+      if (!label.toLowerCase().includes('credits')) continue;
+      if (!credByLabel.has(label)) credByLabel.set(label, key);
     }
 
     const out = [];
@@ -364,6 +381,7 @@ export async function GET(req: NextRequest) {
           ? (remCandidates.get(spec.remittance!) || []).map(k => k.split('/').pop())
           : undefined,
         creditFile: credKey ? credKey.split('/').pop() : null,
+        creditMonth: credKey ? prevLabel : null,
         amountColumn: rem?.amountColumn ?? null,
         rawRows: rem?.rowCount ?? 0,
         amount, enrolled, capFee,
@@ -385,14 +403,18 @@ export async function GET(req: NextRequest) {
 
     // Included files that matched no table row, so nothing is silently dropped.
     const usedLabels = new Set(out.flatMap(r => [r.remittanceFile, r.creditFile].filter(Boolean)));
-    const unmapped = monthFiles
-      .filter(k => includedKeys.has(k) || classify(k.split('/').pop() || '').toLowerCase().includes('credits'))
+    const eligible = [
+      ...monthFiles.filter(k => includedKeys.has(k)
+        && !classify(k.split('/').pop() || '').toLowerCase().includes('credits')),
+      ...prevMonthFiles.filter(k => classify(k.split('/').pop() || '').toLowerCase().includes('credits')),
+    ];
+    const unmapped = eligible
       .map(k => k.split('/').pop() || '')
       .filter(n => n && !usedLabels.has(n));
 
     const noManifest = includedKeys.size === 0;
 
-    return NextResponse.json({ month, monthPrefix: prefix, rows: out, totals, unmapped, noManifest });
+    return NextResponse.json({ month, monthPrefix: prefix, creditMonth: prevLabel, rows: out, totals, unmapped, noManifest });
   } catch (err: any) {
     console.error('[welfare] error:', err);
     return NextResponse.json({ error: err.message || 'Failed to build the welfare table' }, { status: 500 });
