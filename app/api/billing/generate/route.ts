@@ -13,11 +13,44 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 import { requireAdmin } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 const FUNCTION_NAME = process.env.BILLING_LAMBDA_NAME || 'reconcile-billing';
+
+const s3 = new S3Client({
+  region: REGION,
+  credentials: {
+    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY!,
+  },
+});
+
+// After a successful run, drop any approved-file override for the month so the
+// freshly generated report is what gets displayed.
+//
+// report-file resolves the displayed file as:
+//     approvedKey || Reconciliation_Output_<Month>_<Year>.xlsx
+// so without this the Lambda would write a new report that nobody ever sees,
+// because an older approved file keeps winning.
+//
+// This only rewrites the small approved.json pointer. No report files are
+// copied, moved or duplicated: the generated xlsx is overwritten in place by
+// the Lambda, and approved files stay where they were uploaded.
+async function clearApproval(prefix: string, who: string) {
+  const jsonKey = `billing-updates/${prefix}/approved.json`;
+  await s3.send(new PutObjectCommand({
+    Bucket: BUCKET,
+    Key: jsonKey,
+    Body: JSON.stringify(
+      { approvedKey: null, clearedAt: new Date().toISOString(), clearedBy: who },
+      null, 2
+    ),
+    ContentType: 'application/json',
+  }));
+}
 
 const lambda = new LambdaClient({
   region: REGION,
@@ -95,20 +128,24 @@ export async function POST(req: NextRequest) {
       // reconcile-billing may return a bare string or nothing at all. That is
       // not a failure: the report is written to S3 regardless, so report-file
       // will pick it up. Surface the raw text instead of erroring.
+      await clearApproval(prefix, gate.email);
       return NextResponse.json({
         ok: true,
         month,
         monthPrefix: prefix,
         durationMs,
+        clearedApproval: true,
         raw: payloadText,
       });
     }
 
+    await clearApproval(prefix, gate.email);
     return NextResponse.json({
       ok: true,
       month,
       monthPrefix: prefix,
       durationMs,
+      clearedApproval: true,
       ...(payload && typeof payload === 'object' ? payload : { result: payload }),
     });
   } catch (err: any) {
