@@ -256,12 +256,32 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // Every file All Info shows for this month, NOT just the manifest.
-    // Credits files are routinely left un-included so they don't disturb the
-    // consultant report, and this table still needs them.
+    // File selection, two different rules:
+    //
+    //   REMITTANCES - only files INCLUDED in All Info for this month. This is
+    //     what disambiguates carriers with several remittance files. Cassena
+    //     ships Invoice / Vision / main remittances that all classify the same
+    //     way, and picking by S3 listing order grabbed the Invoice file: 1018
+    //     enrolled and no welfare column, so the amount came out as zero.
+    //
+    //   CREDITS - any file for the month that is not an auto-excluded type.
+    //     Credits are routinely left un-included so they don't disturb the
+    //     consultant report, so requiring inclusion would silently zero them.
     const [, mm] = prefix.split('-');
     const targetMonth = parseInt(mm, 10) - 1;
     const targetYear = parseInt(prefix.split('-')[0], 10);
+
+    let includedKeys = new Set<string>();
+    try {
+      const m = await s3.send(new GetObjectCommand({
+        Bucket: BUCKET, Key: `manifests/${prefix}.json`,
+      }));
+      const parsed = JSON.parse((await toBuffer(m.Body as any)).toString('utf8'));
+      includedKeys = new Set<string>(Array.isArray(parsed.included) ? parsed.included : []);
+    } catch {
+      // No manifest yet: remittance rows will be empty and the warning below
+      // explains why, rather than silently reporting zeros.
+    }
 
     const keys: string[] = [];
     let token: string | undefined;
@@ -273,6 +293,8 @@ export async function GET(req: NextRequest) {
         const k = o.Key || '';
         if (!k || k.endsWith('/')) continue;
         const lower = k.toLowerCase();
+        // .pdf/.zip are the auto-excluded types; they never carry member rows.
+        if (lower.endsWith('.pdf') || lower.endsWith('.zip')) continue;
         if (!lower.endsWith('.csv') && !lower.endsWith('.xlsx') && !lower.endsWith('.xls')) continue;
         keys.push(k);
       }
@@ -290,11 +312,20 @@ export async function GET(req: NextRequest) {
       }, { status: 404 });
     }
 
-    // fileLabel -> S3 key
-    const byLabel = new Map<string, string>();
+    // Remittances: included only. Credits: everything for the month.
+    const remByLabel = new Map<string, string>();
+    const remCandidates = new Map<string, string[]>();
+    const credByLabel = new Map<string, string>();
+
     for (const key of monthFiles) {
       const label = classify(key.split('/').pop() || '');
-      if (label !== 'unknown' && !byLabel.has(label)) byLabel.set(label, key);
+      if (label === 'unknown') continue;
+      if (label.toLowerCase().includes('credits')) {
+        if (!credByLabel.has(label)) credByLabel.set(label, key);
+      } else if (includedKeys.has(key)) {
+        remCandidates.set(label, [...(remCandidates.get(label) || []), key]);
+        if (!remByLabel.has(label)) remByLabel.set(label, key);
+      }
     }
 
     const out = [];
@@ -310,8 +341,8 @@ export async function GET(req: NextRequest) {
         continue;
       }
 
-      const remKey = byLabel.get(spec.remittance) || null;
-      const credKey = spec.credits ? (byLabel.get(spec.credits) || null) : null;
+      const remKey = remByLabel.get(spec.remittance) || null;
+      const credKey = spec.credits ? (credByLabel.get(spec.credits) || null) : null;
 
       const rem = remKey ? await parseFile(remKey, spec.groupFilter) : null;
       // Credits are counted raw: no dedup, per the operator's instruction.
@@ -329,6 +360,9 @@ export async function GET(req: NextRequest) {
         rate: spec.rate,
         mapped: true,
         remittanceFile: remKey ? remKey.split('/').pop() : null,
+        ambiguous: (remCandidates.get(spec.remittance!) || []).length > 1
+          ? (remCandidates.get(spec.remittance!) || []).map(k => k.split('/').pop())
+          : undefined,
         creditFile: credKey ? credKey.split('/').pop() : null,
         amountColumn: rem?.amountColumn ?? null,
         rawRows: rem?.rowCount ?? 0,
@@ -352,10 +386,13 @@ export async function GET(req: NextRequest) {
     // Included files that matched no table row, so nothing is silently dropped.
     const usedLabels = new Set(out.flatMap(r => [r.remittanceFile, r.creditFile].filter(Boolean)));
     const unmapped = monthFiles
+      .filter(k => includedKeys.has(k) || classify(k.split('/').pop() || '').toLowerCase().includes('credits'))
       .map(k => k.split('/').pop() || '')
       .filter(n => n && !usedLabels.has(n));
 
-    return NextResponse.json({ month, monthPrefix: prefix, rows: out, totals, unmapped });
+    const noManifest = includedKeys.size === 0;
+
+    return NextResponse.json({ month, monthPrefix: prefix, rows: out, totals, unmapped, noManifest });
   } catch (err: any) {
     console.error('[welfare] error:', err);
     return NextResponse.json({ error: err.message || 'Failed to build the welfare table' }, { status: 500 });
