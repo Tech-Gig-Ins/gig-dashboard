@@ -70,7 +70,10 @@ const norm = (h: string) => String(h || '').toLowerCase().replace(/\s+/g, ' ').t
 const normName = (n: string) => String(n || '').toLowerCase().replace(/[^a-z]/g, '');
 
 function findCol(headers: string[], candidates: string[], strict = false): number {
-  const nh = headers.map(norm);
+  // Array.from, not map: map preserves holes in sparse arrays and findIndex
+  // then visits them as undefined, which threw
+  // "Cannot read properties of undefined (reading 'includes')".
+  const nh = Array.from(headers || [], (h) => norm(h as string));
   for (const c of candidates) {
     const i = nh.findIndex(h => h === c.toLowerCase());
     if (i !== -1) return i;
@@ -108,7 +111,7 @@ function monthToPrefix(label: string): string | null {
 // Same classification rules as the master dashboard, so a file lands in the
 // same bucket in both places.
 function classify(filename: string): string {
-  const l = filename.toLowerCase();
+  const l = String(filename || '').toLowerCase();
   const rem = l.includes('remittance'), cred = l.includes('credits');
   if (l.includes('corechoice')) {
     if (l.includes('t1')) return 'Corechoice T1';
@@ -137,7 +140,7 @@ const MONTH_LOOKUP: Record<string, number> = {
 
 // Which month a filename belongs to. Same patterns the All Info grouping uses.
 function detectMonthYear(filename: string): { year: number; month: number } | null {
-  const lower = filename.toLowerCase();
+  const lower = String(filename || '').toLowerCase();
   const m1 = lower.match(/(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[\s_\-]*(\d{4})/);
   if (m1) {
     const mi = MONTH_LOOKUP[m1[1]];
@@ -181,17 +184,17 @@ async function parseFile(key: string, groupFilter?: string): Promise<Parsed> {
   if (key.toLowerCase().endsWith('.csv')) {
     const text = buf.toString('utf8').replace(/^\uFEFF/, '');
     const wb = XLSX.read(text, { type: 'string' });
-    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false });
+    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false, defval: '' });
   } else {
     const wb = XLSX.read(buf, { type: 'buffer' });
-    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false });
+    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false, defval: '' });
   }
 
   // Header row = first row containing a recognisable name column. TPA files
   // carry ~15 rows of metadata above the header.
   let hIdx = -1, headers: string[] = [];
   for (let i = 0; i < Math.min(rows.length, 30); i++) {
-    const h = (rows[i] || []).map((c: any) => String(c ?? '').trim());
+    const h = Array.from(rows[i] || [], (c: any) => String(c ?? '').trim());
     if (findCol(h, ['member last', 'last name', 'last'], true) !== -1 ||
         findCol(h, ['subscriber name', 'member name'], true) !== -1) {
       hIdx = i; headers = h; break;
@@ -217,7 +220,7 @@ async function parseFile(key: string, groupFilter?: string): Promise<Parsed> {
 
   for (let i = hIdx + 1; i < rows.length; i++) {
     const r = rows[i] || [];
-    if (r.every((c: any) => String(c ?? '').trim() === '')) continue;
+    if (Array.from(r, (c: any) => String(c ?? '').trim()).every(v => v === '')) continue;
 
     const sub = cell(r, subIdx), f = cell(r, firstIdx), l = cell(r, lastIdx);
     const mf = cell(r, mFirst), ml = cell(r, mLast);
