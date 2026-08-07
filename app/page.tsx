@@ -717,17 +717,29 @@ export default function Dashboard() {
     // served from the CDN as static HTML, proxy never ran for this request.
     // A 401 here therefore means "signed out but still looking at the shell",
     // and the only correct response is to send the browser to sign in.
-    fetch('/api/auth/me')
-      .then(r => (r.ok ? r.json() : null))
-      .then(d => {
+    // On a 401 here the id token has expired, which after an hour or two of
+    // idling is the normal case. Try the 7-day refresh token BEFORE giving up:
+    // the fetch interceptor deliberately skips /api/auth/ URLs, so without this
+    // an expired token on page load sent the user to sign in again even though
+    // a perfectly good refresh token was sitting in the cookie.
+    (async () => {
+      let res = await fetch('/api/auth/me');
+      if (res.status === 401) {
+        const refreshed = await fetch('/api/auth/refresh', { method: 'POST' })
+          .then(r => r.ok)
+          .catch(() => false);
+        if (refreshed) res = await fetch('/api/auth/me');
+      }
+      if (res.ok) {
+        const d = await res.json().catch(() => null);
         if (d?.authenticated) {
           setAuthUser(d);
           setAuthChecked(true);
-        } else {
-          window.location.href = '/api/auth/login';
+          return;
         }
-      })
-      .catch(() => { window.location.href = '/api/auth/login'; });
+      }
+      window.location.href = '/api/auth/login';
+    })();
   }, []);
 
   // ==================== INCLUSION MANIFESTS ====================

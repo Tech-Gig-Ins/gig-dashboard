@@ -21,6 +21,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 const ID_COOKIE = 'gwu_id';
+const REFRESH_COOKIE = 'gwu_rt';
 
 // Paths reachable without a session. Everything else requires one.
 const PUBLIC_PREFIXES = [
@@ -38,7 +39,12 @@ export function proxy(request: NextRequest) {
 
   if (isPublic(pathname)) return NextResponse.next();
 
-  const hasSession = Boolean(request.cookies.get(ID_COOKIE)?.value);
+  // A refresh cookie alone is enough to let the request through: the page's
+  // startup check will trade it for fresh tokens. Redirecting to login here
+  // would defeat the 7-day session, because the id token cookie expires long
+  // before the refresh token does.
+  const hasSession = Boolean(request.cookies.get(ID_COOKIE)?.value)
+                  || Boolean(request.cookies.get(REFRESH_COOKIE)?.value);
   if (hasSession) return NextResponse.next();
 
   // API calls get a 401 rather than an HTML redirect, so fetch() callers can
