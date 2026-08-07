@@ -494,7 +494,9 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
 
     const planNameIdx = findCol(headers, ['plan name', 'class/plan', 'class plan']);
     const anthemIdIdx = findCol(headers, ['anthem id']);
-    const welfareIdx = findCol(headers, ['welfare amount', '426 hbf welfare due', 'welfare due']);
+    // 'price' is the Refresh export's amount column; without it every Refresh
+    // row showed '-' in the Payment column.
+    const welfareIdx = findCol(headers, ['426 hbf welfare due', 'welfare amount', 'welfare due', 'price']);
     const cityIdx = findCol(headers, ['city']);
     const stateIdx = findCol(headers, ['state']);
     const address1Idx = findCol(headers, ['address 1', 'address1', 'address line 1']);
