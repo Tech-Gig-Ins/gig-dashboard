@@ -3962,9 +3962,9 @@ export default function Dashboard() {
                 <li><strong>Credit Amount</strong> and <strong>Credit Count</strong> come from the matching credits file for the same month. Credit Count is a raw row count with no de-duplication. Rows with no credits file show zero.</li>
                 <li><strong>Credit Fees</strong> = Credit Count &times; fee rate.</li>
                 <li><strong>NYP Wire</strong> = Remittance Amount &minus; GIG Cap Fee &minus; Credit Amount + Credit Fees.</li>
-                <li><strong>Fee rates</strong> are per source: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131, BDSB 131, Northstead 142, Refresh 142.</li>
+                <li><strong>Fee rates</strong> are per source: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131, BDSB 131, Northstead 142, Refresh 142, EP6 142, PIOPAC 142.</li>
                 <li><strong>Hartford</strong> is not a separate file. It is the rows of the Corechoice T3 remittance whose Group is HARTFORD FUNDING, LTD.</li>
-                <li>Only files <strong>included in the All Info tab</strong> for this month are counted.</li>
+                <li>Files are taken from <strong>every file dated to this month in All Info</strong>, remittances and credits alike. The Include toggles do not affect this table.</li>
               </ul>
             </div>
 

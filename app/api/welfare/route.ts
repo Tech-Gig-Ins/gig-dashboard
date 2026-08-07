@@ -52,15 +52,17 @@ type RowSpec = {
 };
 
 const ROWS: RowSpec[] = [
-  { label: 'Cassena',                  remittance: 'Cassena Remittance',    credits: 'Cassena Credits',    rate: 94 },
-  { label: 'Tpa.com (Gig)',            remittance: 'Gig Remittance',        credits: 'Gig Credits',        rate: 131 },
-  { label: 'GIG Credit Cards',         remittance: null,                    credits: null,                 rate: 120 },
-  { label: 'Hartford (Corechoice T3)', remittance: 'Corechoice T3',         credits: null,                 rate: 54,
+  { label: 'Cassena',          remittance: 'Cassena Remittance',    credits: 'Cassena Credits',    rate: 94 },
+  { label: 'Tpa.com',          remittance: 'Gig Remittance',        credits: 'Gig Credits',        rate: 131 },
+  { label: 'GIG Credit Cards', remittance: null,                    credits: null,                 rate: 120 },
+  { label: 'Hartford',         remittance: 'Corechoice T3',         credits: null,                 rate: 54,
     groupFilter: 'HARTFORD FUNDING, LTD.' },
-  { label: 'GWU3',                     remittance: 'GWU3 Remittance',       credits: 'GWU3 Credits',       rate: 131 },
-  { label: 'BDSB',                     remittance: 'BDSB Remittance',       credits: 'BDSB Credits',       rate: 131 },
-  { label: 'Northstead',               remittance: 'Northstead Remittance', credits: 'Northstead Credits', rate: 142 },
-  { label: 'Refresh',                  remittance: 'Refresh',               credits: null,                 rate: 142 },
+  { label: 'GWU3',             remittance: 'GWU3 Remittance',       credits: 'GWU3 Credits',       rate: 131 },
+  { label: 'BDSB',             remittance: 'BDSB Remittance',       credits: 'BDSB Credits',       rate: 131 },
+  { label: 'Northstead',       remittance: 'Northstead Remittance', credits: 'Northstead Credits', rate: 142 },
+  { label: 'Refresh',          remittance: 'Refresh',               credits: null,                 rate: 142 },
+  { label: 'EP6',              remittance: 'EP6 Remittance',        credits: null,                 rate: 142 },
+  { label: 'PIOPAC',           remittance: 'Enroll Confidently or PIOPAC', credits: null,           rate: 142 },
 ];
 
 // ---------- shared helpers (mirrors app/api/master/route.ts) ----------------
@@ -125,6 +127,37 @@ function classify(filename: string): string {
   }
   if (l.includes('refresh')) return 'Refresh';
   return 'unknown';
+}
+
+const MONTH_LOOKUP: Record<string, number> = {
+  jan:0,january:0,feb:1,february:1,mar:2,march:2,apr:3,april:3,may:4,jun:5,june:5,
+  jul:6,july:6,aug:7,august:7,sep:8,sept:8,september:8,oct:9,october:9,
+  nov:10,november:10,dec:11,december:11,
+};
+
+// Which month a filename belongs to. Same patterns the All Info grouping uses.
+function detectMonthYear(filename: string): { year: number; month: number } | null {
+  const lower = filename.toLowerCase();
+  const m1 = lower.match(/(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[\s_\-]*(\d{4})/);
+  if (m1) {
+    const mi = MONTH_LOOKUP[m1[1]];
+    const yr = parseInt(m1[2], 10);
+    if (mi !== undefined && yr >= 2020 && yr <= 2099) return { year: yr, month: mi };
+  }
+  const m2 = lower.match(/(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{2,4})/);
+  if (m2) {
+    const mo = parseInt(m2[1], 10) - 1;
+    let yr = parseInt(m2[3], 10);
+    if (yr < 100) yr += 2000;
+    if (mo >= 0 && mo <= 11 && yr >= 2020 && yr <= 2099) return { year: yr, month: mo };
+  }
+  const m3 = lower.match(/(\d{4})[-_](\d{1,2})/);
+  if (m3) {
+    const yr = parseInt(m3[1], 10);
+    const mo = parseInt(m3[2], 10) - 1;
+    if (mo >= 0 && mo <= 11 && yr >= 2020 && yr <= 2099) return { year: yr, month: mo };
+  }
+  return null;
 }
 
 async function toBuffer(body: any): Promise<Buffer> {
@@ -220,30 +253,44 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // Included files for the month, from the manifest the All Info tab writes.
-    let included: string[] = [];
-    try {
-      const m = await s3.send(new GetObjectCommand({
-        Bucket: BUCKET, Key: `manifests/${prefix}.json`,
+    // Every file All Info shows for this month, NOT just the manifest.
+    // Credits files are routinely left un-included so they don't disturb the
+    // consultant report, and this table still needs them.
+    const [, mm] = prefix.split('-');
+    const targetMonth = parseInt(mm, 10) - 1;
+    const targetYear = parseInt(prefix.split('-')[0], 10);
+
+    const keys: string[] = [];
+    let token: string | undefined;
+    do {
+      const page = await s3.send(new ListObjectsV2Command({
+        Bucket: BUCKET, Prefix: 'carrier=', ContinuationToken: token,
       }));
-      const parsed = JSON.parse((await toBuffer(m.Body as any)).toString('utf8'));
-      included = Array.isArray(parsed.included) ? parsed.included : [];
-    } catch {
+      for (const o of page.Contents || []) {
+        const k = o.Key || '';
+        if (!k || k.endsWith('/')) continue;
+        const lower = k.toLowerCase();
+        if (!lower.endsWith('.csv') && !lower.endsWith('.xlsx') && !lower.endsWith('.xls')) continue;
+        keys.push(k);
+      }
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
+
+    const monthFiles = keys.filter(k => {
+      const d = detectMonthYear(k.split('/').pop() || '');
+      return d && d.year === targetYear && d.month === targetMonth;
+    });
+
+    if (monthFiles.length === 0) {
       return NextResponse.json({
-        error: `No files are included for ${month}. Include them in the All Info tab first.`,
-      }, { status: 404 });
-    }
-    if (included.length === 0) {
-      return NextResponse.json({
-        error: `The manifest for ${month} is empty.`,
+        error: `No files found for ${month}. Check the All Info tab.`,
       }, { status: 404 });
     }
 
-    // fileLabel -> S3 key, for the included set only.
+    // fileLabel -> S3 key
     const byLabel = new Map<string, string>();
-    for (const key of included) {
-      const name = key.split('/').pop() || '';
-      const label = classify(name);
+    for (const key of monthFiles) {
+      const label = classify(key.split('/').pop() || '');
       if (label !== 'unknown' && !byLabel.has(label)) byLabel.set(label, key);
     }
 
@@ -301,7 +348,7 @@ export async function GET(req: NextRequest) {
 
     // Included files that matched no table row, so nothing is silently dropped.
     const usedLabels = new Set(out.flatMap(r => [r.remittanceFile, r.creditFile].filter(Boolean)));
-    const unmapped = included
+    const unmapped = monthFiles
       .map(k => k.split('/').pop() || '')
       .filter(n => n && !usedLabels.has(n));
 
