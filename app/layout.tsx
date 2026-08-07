@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Gig Insurance Internal Dashboard",
+  title: "Gig Workers Universe Internal Dashboard",
   description: "Internal operations dashboard",
 };
 

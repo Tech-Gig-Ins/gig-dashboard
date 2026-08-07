@@ -2607,7 +2607,7 @@ export default function Dashboard() {
       <header className="header">
         <div className="brand">
           <div className="brand-mark">G</div>
-          <span className="brand-text">Gig Insurance</span>
+          <span className="brand-text">Gig Workers Universe</span>
         </div>
         <div className="header-meta">
           <span className="status-dot" />
@@ -2637,7 +2637,7 @@ export default function Dashboard() {
       <section className="hero">
         <div className="eyebrow">Internal Operations</div>
         <h1 className="title">
-          Gig Insurance <span className="title-accent">Internal Dashboard</span>
+          Gig Workers Universe <span className="title-accent">Internal Dashboard</span>
         </h1>
       </section>
 
@@ -2674,12 +2674,17 @@ export default function Dashboard() {
                 )}
               </div>
               <button className="search-btn" onClick={triggerAllInfoSearch}>Search</button>
-              <div className="upload-files-wrap">
-                <button className="upload-files-btn" onClick={openUploadModal}>
-                  Upload Files
-                </button>
-                <div className="upload-files-hint">access only to admin - Andrew</div>
-              </div>
+              {/* Admin only. /api/master/upload enforces requireAdmin server-side;
+                  hiding it keeps viewers from seeing a control that would 403.
+                  Replaces the old "access only to admin - Andrew" note, which was
+                  documentation rather than an actual restriction. */}
+              {authUser?.isAdmin && (
+                <div className="upload-files-wrap">
+                  <button className="upload-files-btn" onClick={openUploadModal}>
+                    Upload Files
+                  </button>
+                </div>
+              )}
             </div>
 
             {includeError && (
@@ -3852,18 +3857,21 @@ export default function Dashboard() {
                         return opts.map(y => <option key={y} value={y}>{y}</option>);
                       })()}
                     </select>
-                    <button
-                      className="consultant-new-month-btn"
-                      onClick={() => {
-                        setBillingCardConnectFile(null);
-                        setBillingRefreshFile(null);
-                        setBillingSourcesError(null);
-                        setShowBillingUploadModal(true);
-                      }}
-                      title="Upload CardConnect + Refresh source files for this month"
-                    >
-                      Upload Files
-                    </button>
+                    {/* Admin only; /api/billing/upload-sources requires it. */}
+                    {authUser?.isAdmin && (
+                      <button
+                        className="consultant-new-month-btn"
+                        onClick={() => {
+                          setBillingCardConnectFile(null);
+                          setBillingRefreshFile(null);
+                          setBillingSourcesError(null);
+                          setShowBillingUploadModal(true);
+                        }}
+                        title="Upload CardConnect + Refresh source files for this month"
+                      >
+                        Upload Files
+                      </button>
+                    )}
                     <button
                       className="consultant-primary-btn"
                       onClick={generateBillingReport}
