@@ -56,7 +56,7 @@ type SearchResponse = {
   results: SearchMatch[];
 };
 
-type TabKey = 'master' | 'all-info' | 'consultant' | 'billing';
+type TabKey = 'master' | 'all-info' | 'consultant' | 'billing' | 'welfare';
 
 type MemberRecord = {
   memberName: string;
@@ -92,6 +92,15 @@ type MasterData = {
   previousMonthMissingFiles: string[];
   fileTimelines: FileTimeline[];
 };
+
+
+// US dollars, two decimals, negatives in parentheses as finance expects.
+function fmtUSD(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '';
+  const n = Number(v);
+  const body = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return n < 0 ? `($${body})` : `$${body}`;
+}
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -566,6 +575,93 @@ export default function Dashboard() {
   // Nothing renders until the session is confirmed, so a signed-out visitor
   // never sees dashboard chrome or triggers data fetches.
   const [authChecked, setAuthChecked] = useState(false);
+
+  // ===== Welfare (NYP wire) tab =====
+  type WelfareRow = {
+    label: string; rate: number; mapped: boolean;
+    remittanceFile: string | null; creditFile: string | null;
+    amountColumn?: string | null; rawRows?: number;
+    amount: number | null; enrolled: number | null; capFee: number | null;
+    creditAmount: number | null; creditCount: number | null;
+    creditFees: number | null; nypWire: number | null;
+  };
+  type WelfareResp = {
+    month: string; monthPrefix: string;
+    rows: WelfareRow[];
+    totals: Record<string, number>;
+    unmapped: string[];
+  };
+  const [welfareMonth, setWelfareMonth] = useState<string>('');
+  const [welfareData, setWelfareData] = useState<WelfareResp | null>(null);
+  const [welfareLoading, setWelfareLoading] = useState(false);
+  const [welfareError, setWelfareError] = useState<string | null>(null);
+
+  // The table starts from June 2026; earlier months have no file set.
+  const welfareMonthOptions: string[] = (() => {
+    const out: string[] = [];
+    const start = new Date(2026, 5, 1);           // June 2026
+    const now = new Date();
+    const end = new Date(now.getFullYear(), now.getMonth(), 1);
+    for (let d = new Date(end); d >= start; d.setMonth(d.getMonth() - 1)) {
+      out.push(`${MONTH_NAMES[d.getMonth()]} ${d.getFullYear()}`);
+    }
+    return out;
+  })();
+
+  async function loadWelfare(month: string) {
+    if (!month) return;
+    setWelfareLoading(true);
+    setWelfareError(null);
+    try {
+      const res = await fetch(`/api/welfare?month=${encodeURIComponent(month)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Failed (${res.status})`);
+      setWelfareData(data);
+    } catch (e: any) {
+      setWelfareError(e.message || 'Failed to load');
+      setWelfareData(null);
+    } finally {
+      setWelfareLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab !== 'welfare') return;
+    const m = welfareMonth || welfareMonthOptions[0] || '';
+    if (!welfareMonth && m) setWelfareMonth(m);
+    if (m) loadWelfare(m);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, welfareMonth]);
+
+  // Build the workbook client-side; the table is small and this avoids a round trip.
+  function downloadWelfareExcel() {
+    if (!welfareData) return;
+    const header = ['Remittance', 'Remittance Amount', 'Enrolled', 'GIG Cap Fee',
+                    'Credit Amount', 'Credit Count', 'Credit Fees', 'NYP Wire'];
+    const body = welfareData.rows.map(r => ([
+      r.label,
+      r.mapped ? r.amount : '', r.mapped ? r.enrolled : '', r.mapped ? r.capFee : '',
+      r.mapped ? r.creditAmount : '', r.mapped ? r.creditCount : '',
+      r.mapped ? r.creditFees : '', r.mapped ? r.nypWire : '',
+    ]));
+    const t = welfareData.totals;
+    body.push(['TOTAL', t.amount, t.enrolled, t.capFee, t.creditAmount, t.creditCount, t.creditFees, t.nypWire]);
+
+    const aoa: any[][] = [
+      [`Wire Payments to NY Practice - ${welfareData.month}`], [],
+      ['Cap Fee = Enrolled x fee rate. Credit Fees = Credit Count x fee rate.'],
+      ['NYP Wire = Remittance Amount - GIG Cap Fee - Credit Amount + Credit Fees.'],
+      ['Enrolled is de-duplicated members. Credit Count is raw rows.'],
+      [], header, ...body,
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [{ wch: 26 }, { wch: 18 }, { wch: 11 }, { wch: 14 },
+                   { wch: 15 }, { wch: 13 }, { wch: 13 }, { wch: 16 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'NYP Wire');
+    XLSX.writeFile(wb, `NYP Wire ${welfareData.month}.xlsx`);
+  }
+
   const [consultantActiveReportSheet, setConsultantActiveReportSheet] = useState<string>('');
   const [consultantActiveDirectorySheet, setConsultantActiveDirectorySheet] = useState<string>('');
   const [showNewMonthDialog, setShowNewMonthDialog] = useState(false);
@@ -2192,6 +2288,17 @@ export default function Dashboard() {
 
         .tabs-section { position: relative; z-index: 10; padding: 0 56px; max-width: 1400px; margin: 0 auto 24px; }
         .tabs-pill { display: inline-flex; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 999px; padding: 6px; gap: 4px; backdrop-filter: blur(20px); }
+        .welfare-notes { background: rgba(107,164,255,0.05); border: 1px solid rgba(107,164,255,0.2); border-radius: 10px; padding: 18px 22px; margin-bottom: 22px; }
+        .welfare-notes-title { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(107,164,255,0.9); font-weight: 600; margin-bottom: 12px; }
+        .welfare-notes ul { margin: 0; padding-left: 20px; }
+        .welfare-notes li { color: rgba(255,255,255,0.62); font-size: 13px; line-height: 1.75; }
+        .welfare-notes strong { color: rgba(255,255,255,0.9); font-weight: 600; }
+        .welfare-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+        .welfare-table th { white-space: nowrap; }
+        .welfare-row-blank td { color: rgba(255,255,255,0.28); }
+        .welfare-missing { color: #f5c86e; font-size: 11px; font-style: italic; }
+        .welfare-wire { font-weight: 600; color: #80d090; }
+        .welfare-total-row td { border-top: 2px solid rgba(107,164,255,0.4); font-weight: 700; color: #ffffff; }
         .tab-btn { padding: 10px 24px; background: transparent; border: none; border-radius: 999px; color: rgba(255, 255, 255, 0.6); font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s ease; font-family: 'Inter', sans-serif; }
         .tab-btn:hover { color: #ffffff; }
         .tab-btn.active { background: linear-gradient(135deg, #4d8eff 0%, #1546c4 100%); color: #ffffff; box-shadow: 0 4px 16px rgba(77, 142, 255, 0.3); }
@@ -2648,6 +2755,10 @@ export default function Dashboard() {
           <button className={`tab-btn ${activeTab === 'all-info' ? 'active' : ''}`} onClick={() => setActiveTab('all-info')}>All Info</button>
           <button className={`tab-btn ${activeTab === 'consultant' ? 'active' : ''}`} onClick={() => setActiveTab('consultant')}>Consultant Report</button>
           <button className={`tab-btn ${activeTab === 'billing' ? 'active' : ''}`} onClick={() => setActiveTab('billing')}>Billing</button>
+          {/* Admin only. /api/welfare enforces requireAdmin regardless. */}
+          {authUser?.isAdmin && (
+            <button className={`tab-btn ${activeTab === 'welfare' ? 'active' : ''}`} onClick={() => setActiveTab('welfare')}>Welfare</button>
+          )}
         </div>
       </section>
 
@@ -3815,6 +3926,111 @@ export default function Dashboard() {
         )}
 
         {/* ==================== BILLING TAB ==================== */}
+        {activeTab === 'welfare' && (
+          <div className="tab-panel">
+            <div className="consultant-header">
+              <div>
+                <h2 className="consultant-title">Wire Payments to NY Practice</h2>
+                <div className="consultant-sub">{welfareMonth || 'Select a month'}</div>
+              </div>
+              <div className="consultant-header-actions">
+                <select
+                  className="consultant-month-select"
+                  value={welfareMonth}
+                  onChange={(e) => { setWelfareMonth(e.target.value); setWelfareData(null); }}
+                >
+                  {welfareMonthOptions.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+                <button
+                  className="consultant-primary-btn"
+                  onClick={downloadWelfareExcel}
+                  disabled={!welfareData || welfareLoading}
+                >
+                  Download Excel
+                </button>
+              </div>
+            </div>
+
+            {/* Calculation notes. Kept above the table so the figures are never
+                read without the rules that produced them. */}
+            <div className="welfare-notes">
+              <div className="welfare-notes-title">How these figures are calculated</div>
+              <ul>
+                <li><strong>Remittance Amount</strong> is the sum of the amount column across every row of the included remittance file for this month.</li>
+                <li><strong>Enrolled</strong> counts distinct members after de-duplication, the same way the Master Dashboard counts people rather than plan enrolments.</li>
+                <li><strong>GIG Cap Fee</strong> = Enrolled &times; fee rate.</li>
+                <li><strong>Credit Amount</strong> and <strong>Credit Count</strong> come from the matching credits file for the same month. Credit Count is a raw row count with no de-duplication. Rows with no credits file show zero.</li>
+                <li><strong>Credit Fees</strong> = Credit Count &times; fee rate.</li>
+                <li><strong>NYP Wire</strong> = Remittance Amount &minus; GIG Cap Fee &minus; Credit Amount + Credit Fees.</li>
+                <li><strong>Fee rates</strong> are per source: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131, BDSB 131, Northstead 142, Refresh 142.</li>
+                <li><strong>Hartford</strong> is not a separate file. It is the rows of the Corechoice T3 remittance whose Group is HARTFORD FUNDING, LTD.</li>
+                <li>Only files <strong>included in the All Info tab</strong> for this month are counted.</li>
+              </ul>
+            </div>
+
+            {welfareError && <div className="consultant-error">{welfareError}</div>}
+            {welfareLoading && <div className="loading-state">Calculating...</div>}
+
+            {welfareData && !welfareLoading && (
+              <>
+                {welfareData.unmapped.length > 0 && (
+                  <div className="consultant-overwrite-banner" style={{ marginBottom: 16 }}>
+                    <span className="consultant-overwrite-icon">&#9888;</span>
+                    <span>
+                      Included but not used in this table: {welfareData.unmapped.join(', ')}
+                    </span>
+                  </div>
+                )}
+                <div className="table-wrap">
+                  <table className="master-table welfare-table">
+                    <thead>
+                      <tr>
+                        <th>Remittance</th>
+                        <th>Remittance Amount</th>
+                        <th>Enrolled</th>
+                        <th>GIG Cap Fee</th>
+                        <th>Credit Amount</th>
+                        <th>Credit Count</th>
+                        <th>Credit Fees</th>
+                        <th>NYP Wire</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {welfareData.rows.map(r => (
+                        <tr key={r.label} className={r.mapped ? '' : 'welfare-row-blank'}>
+                          <td title={r.remittanceFile || 'No associated file'}>
+                            {r.label}
+                            {r.mapped && !r.remittanceFile && (
+                              <span className="welfare-missing"> file not included</span>
+                            )}
+                          </td>
+                          <td className="num">{r.mapped ? fmtUSD(r.amount) : ''}</td>
+                          <td className="num">{r.mapped ? r.enrolled : ''}</td>
+                          <td className="num">{r.mapped ? fmtUSD(r.capFee) : ''}</td>
+                          <td className="num">{r.mapped ? fmtUSD(r.creditAmount) : ''}</td>
+                          <td className="num">{r.mapped ? r.creditCount : ''}</td>
+                          <td className="num">{r.mapped ? fmtUSD(r.creditFees) : ''}</td>
+                          <td className="num welfare-wire">{r.mapped ? fmtUSD(r.nypWire) : ''}</td>
+                        </tr>
+                      ))}
+                      <tr className="welfare-total-row">
+                        <td>TOTAL</td>
+                        <td className="num">{fmtUSD(welfareData.totals.amount)}</td>
+                        <td className="num">{welfareData.totals.enrolled}</td>
+                        <td className="num">{fmtUSD(welfareData.totals.capFee)}</td>
+                        <td className="num">{fmtUSD(welfareData.totals.creditAmount)}</td>
+                        <td className="num">{welfareData.totals.creditCount}</td>
+                        <td className="num">{fmtUSD(welfareData.totals.creditFees)}</td>
+                        <td className="num welfare-wire">{fmtUSD(welfareData.totals.nypWire)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {activeTab === 'billing' && (
           <div className="billing-dashboard">
             {billingLoading && <div className="loading-state">Loading file...</div>}
