@@ -94,15 +94,6 @@ type MasterData = {
 };
 
 
-// US dollars, plain sign. Credit Amount uses this so the value reads as a
-// straight number rather than accounting-style parentheses.
-function fmtUSDPlain(v: number | null | undefined): string {
-  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '';
-  const n = Number(v);
-  const body = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return n < 0 ? `-$${body}` : `$${body}`;
-}
-
 // US dollars, two decimals, negatives in parentheses as finance expects.
 function fmtUSD(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '';
@@ -3978,7 +3969,7 @@ export default function Dashboard() {
                 <li><strong>Remittance Amount</strong> sums the amount column across <strong>every row</strong> of the remittance file. A member on two plans pays two premiums, so this is deliberately not de-duplicated.</li>
                 <li><strong>Enrolled</strong> counts <strong>distinct members</strong> after de-duplication, matching how the Master Dashboard counts people rather than plan enrolments. It is normally lower than the row count.</li>
                 <li><strong>GIG Cap Fee</strong> = Enrolled &times; fee rate.</li>
-                <li><strong>Credit Amount</strong> sums the amount column of the matching credits file. <strong>Credit Count</strong> is a <strong>raw row count</strong> with no de-duplication. Rows with no credits file show zero.</li>
+                <li><strong>Credit Amount</strong> sums the amount column of the matching credits file, taken as a <strong>positive magnitude</strong>. Credits files store their values as negatives, and the formula already subtracts them, so a negative here would add to the wire instead of reducing it. <strong>Credit Count</strong> is a <strong>raw row count</strong> with no de-duplication. Rows with no credits file show zero.</li>
                 <li><strong>Credit Fees</strong> = Credit Count &times; fee rate.</li>
                 <li><strong>NYP Wire</strong> = Remittance Amount &minus; GIG Cap Fee &minus; Credit Amount + Credit Fees.</li>
                 <li><strong>Fee rates</strong> per source: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131, BDSB 131, Northstead 142, Refresh 142, EP6 142, PIOPAC 142.</li>
@@ -4028,7 +4019,7 @@ export default function Dashboard() {
                           <td className="num">{r.mapped ? fmtUSD(r.amount) : ''}</td>
                           <td className="num">{r.mapped ? r.enrolled : ''}</td>
                           <td className="num">{r.mapped ? fmtUSD(r.capFee) : ''}</td>
-                          <td className="num">{r.mapped ? fmtUSDPlain(r.creditAmount) : ''}</td>
+                          <td className="num">{r.mapped ? fmtUSD(r.creditAmount) : ''}</td>
                           <td className="num">{r.mapped ? r.creditCount : ''}</td>
                           <td className="num">{r.mapped ? fmtUSD(r.creditFees) : ''}</td>
                           <td className="num welfare-wire">{r.mapped ? fmtUSD(r.nypWire) : ''}</td>
@@ -4039,7 +4030,7 @@ export default function Dashboard() {
                         <td className="num">{fmtUSD(welfareData.totals.amount)}</td>
                         <td className="num">{welfareData.totals.enrolled}</td>
                         <td className="num">{fmtUSD(welfareData.totals.capFee)}</td>
-                        <td className="num">{fmtUSDPlain(welfareData.totals.creditAmount)}</td>
+                        <td className="num">{fmtUSD(welfareData.totals.creditAmount)}</td>
                         <td className="num">{welfareData.totals.creditCount}</td>
                         <td className="num">{fmtUSD(welfareData.totals.creditFees)}</td>
                         <td className="num welfare-wire">{fmtUSD(welfareData.totals.nypWire)}</td>

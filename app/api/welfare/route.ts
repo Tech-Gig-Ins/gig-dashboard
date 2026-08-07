@@ -368,7 +368,12 @@ export async function GET(req: NextRequest) {
       const amount = rem?.amount ?? 0;
       const enrolled = rem?.distinct ?? 0;
       const capFee = enrolled * spec.rate;
-      const creditAmount = cred?.amount ?? 0;
+      // Credits files store their values as NEGATIVES. The template's formula
+      // (=C-E-F+H) expects F to be a positive magnitude, so a negative F would
+      // ADD the credit to the wire instead of subtracting it. Take the
+      // magnitude so the arithmetic matches the spreadsheet exactly.
+      const creditAmountRaw = cred?.amount ?? 0;
+      const creditAmount = Math.abs(creditAmountRaw);
       const creditCount = cred?.rowCount ?? 0;
       const creditFees = creditCount * spec.rate;
 
@@ -385,7 +390,7 @@ export async function GET(req: NextRequest) {
         amountColumn: rem?.amountColumn ?? null,
         rawRows: rem?.rowCount ?? 0,
         amount, enrolled, capFee,
-        creditAmount, creditCount, creditFees,
+        creditAmount, creditAmountRaw, creditCount, creditFees,
         nypWire: amount - capFee - creditAmount + creditFees,
       });
     }
