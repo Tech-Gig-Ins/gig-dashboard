@@ -94,6 +94,15 @@ type MasterData = {
 };
 
 
+// US dollars, plain sign. Credit Amount uses this so the value reads as a
+// straight number rather than accounting-style parentheses.
+function fmtUSDPlain(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '';
+  const n = Number(v);
+  const body = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return n < 0 ? `-$${body}` : `$${body}`;
+}
+
 // US dollars, two decimals, negatives in parentheses as finance expects.
 function fmtUSD(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '';
@@ -649,9 +658,14 @@ export default function Dashboard() {
 
     const aoa: any[][] = [
       [`Wire Payments to NY Practice - ${welfareData.month}`], [],
-      ['Cap Fee = Enrolled x fee rate. Credit Fees = Credit Count x fee rate.'],
+      ['Remittances come only from files Included in All Info for this month.'],
+      ['Credits come from any file dated to this month, included or not (.pdf/.zip excluded).'],
+      ['Remittance Amount sums every row. Enrolled counts distinct members after de-duplication.'],
+      ['Cap Fee = Enrolled x fee rate. Credit Fees = Credit Count x fee rate (raw rows).'],
       ['NYP Wire = Remittance Amount - GIG Cap Fee - Credit Amount + Credit Fees.'],
-      ['Enrolled is de-duplicated members. Credit Count is raw rows.'],
+      ['Rates: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131,'],
+      ['       BDSB 131, Northstead 142, Refresh 142, EP6 142, PIOPAC 142.'],
+      ['Hartford = rows of Corechoice T3 whose Group is HARTFORD FUNDING, LTD.'],
       [], header, ...body,
     ];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -3956,15 +3970,20 @@ export default function Dashboard() {
             <div className="welfare-notes">
               <div className="welfare-notes-title">How these figures are calculated</div>
               <ul>
-                <li><strong>Remittance Amount</strong> is the sum of the amount column across every row of the included remittance file for this month.</li>
-                <li><strong>Enrolled</strong> counts distinct members after de-duplication, the same way the Master Dashboard counts people rather than plan enrolments.</li>
+                <li><strong>Which files are used.</strong> Remittances are taken only from files <strong>Included</strong> in the All Info tab for this month. Credits are taken from <strong>any</strong> file dated to this month regardless of Include status, except auto-excluded types (.pdf and .zip).</li>
+                <li><strong>Why the two rules differ.</strong> Some carriers ship several remittance files for one month; Cassena has Invoice, Vision and the main remittance. Inclusion is what identifies the correct one. Credits are often left un-included so they do not disturb the Consultant Report, so requiring inclusion would zero them out.</li>
+                <li><strong>Month matching</strong> reads the month and year from the filename, the same way the All Info tab groups files.</li>
+                <li><strong>Remittance Amount</strong> sums the amount column across <strong>every row</strong> of the remittance file. A member on two plans pays two premiums, so this is deliberately not de-duplicated.</li>
+                <li><strong>Enrolled</strong> counts <strong>distinct members</strong> after de-duplication, matching how the Master Dashboard counts people rather than plan enrolments. It is normally lower than the row count.</li>
                 <li><strong>GIG Cap Fee</strong> = Enrolled &times; fee rate.</li>
-                <li><strong>Credit Amount</strong> and <strong>Credit Count</strong> come from the matching credits file for the same month. Credit Count is a raw row count with no de-duplication. Rows with no credits file show zero.</li>
+                <li><strong>Credit Amount</strong> sums the amount column of the matching credits file. <strong>Credit Count</strong> is a <strong>raw row count</strong> with no de-duplication. Rows with no credits file show zero.</li>
                 <li><strong>Credit Fees</strong> = Credit Count &times; fee rate.</li>
                 <li><strong>NYP Wire</strong> = Remittance Amount &minus; GIG Cap Fee &minus; Credit Amount + Credit Fees.</li>
-                <li><strong>Fee rates</strong> are per source: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131, BDSB 131, Northstead 142, Refresh 142, EP6 142, PIOPAC 142.</li>
-                <li><strong>Hartford</strong> is not a separate file. It is the rows of the Corechoice T3 remittance whose Group is HARTFORD FUNDING, LTD.</li>
-                <li>Files are taken from <strong>every file dated to this month in All Info</strong>, remittances and credits alike. The Include toggles do not affect this table.</li>
+                <li><strong>Fee rates</strong> per source: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131, BDSB 131, Northstead 142, Refresh 142, EP6 142, PIOPAC 142.</li>
+                <li><strong>Hartford</strong> is not a separate file. It is the subset of rows in the Corechoice T3 remittance whose Group is HARTFORD FUNDING, LTD.</li>
+                <li><strong>GIG Credit Cards</strong> has no associated file, so its figures are left blank rather than shown as zero.</li>
+                <li><strong>Unused files.</strong> Any eligible file for this month that maps to no row is listed in a warning above the table, so nothing is dropped silently.</li>
+                <li>Figures start from <strong>June 2026</strong>; earlier months have no file set.</li>
               </ul>
             </div>
 
@@ -4007,7 +4026,7 @@ export default function Dashboard() {
                           <td className="num">{r.mapped ? fmtUSD(r.amount) : ''}</td>
                           <td className="num">{r.mapped ? r.enrolled : ''}</td>
                           <td className="num">{r.mapped ? fmtUSD(r.capFee) : ''}</td>
-                          <td className="num">{r.mapped ? fmtUSD(r.creditAmount) : ''}</td>
+                          <td className="num">{r.mapped ? fmtUSDPlain(r.creditAmount) : ''}</td>
                           <td className="num">{r.mapped ? r.creditCount : ''}</td>
                           <td className="num">{r.mapped ? fmtUSD(r.creditFees) : ''}</td>
                           <td className="num welfare-wire">{r.mapped ? fmtUSD(r.nypWire) : ''}</td>
@@ -4018,7 +4037,7 @@ export default function Dashboard() {
                         <td className="num">{fmtUSD(welfareData.totals.amount)}</td>
                         <td className="num">{welfareData.totals.enrolled}</td>
                         <td className="num">{fmtUSD(welfareData.totals.capFee)}</td>
-                        <td className="num">{fmtUSD(welfareData.totals.creditAmount)}</td>
+                        <td className="num">{fmtUSDPlain(welfareData.totals.creditAmount)}</td>
                         <td className="num">{welfareData.totals.creditCount}</td>
                         <td className="num">{fmtUSD(welfareData.totals.creditFees)}</td>
                         <td className="num welfare-wire">{fmtUSD(welfareData.totals.nypWire)}</td>
