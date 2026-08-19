@@ -2725,7 +2725,10 @@ export default function Dashboard() {
         .month-subgroup-heading h3 { font-family: 'Fraunces', serif; font-size: 18px; font-weight: 500; color: #ffffff; margin: 0; }
         .month-subgroup-count { font-family: 'Inter', sans-serif; font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(255, 255, 255, 0.5); }
 
-        .system-group { margin-bottom: 24px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: hidden; backdrop-filter: blur(20px); }
+        .system-group { margin-bottom: 24px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; overflow: visible; backdrop-filter: blur(20px); }
+        /* The header sits at the top of the card, so it keeps the rounded corners
+           that overflow:hidden used to provide for the whole group. */
+        .system-group > *:first-child { border-top-left-radius: 16px; border-top-right-radius: 16px; }
         .system-name { padding: 18px 28px; background: rgba(77, 142, 255, 0.08); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; justify-content: space-between; align-items: center; }
         .system-name h3 { font-family: 'Fraunces', serif; font-size: 20px; font-weight: 500; color: #ffffff; margin: 0; }
         .system-count { font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(107, 164, 255, 0.9); font-weight: 500; }
@@ -2738,18 +2741,22 @@ export default function Dashboard() {
         .file-item-name { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 13px; color: #ffffff; flex: 1; word-break: break-all; }
         .upload-modal-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 26px; }
         /* The move dialog reuses .upload-modal; give its contents breathing room. */
-        .move-dialog { padding: 28px 32px 26px; }
+        .move-dialog { padding: 30px 34px 28px; }
+        .move-dialog .upload-modal-header { padding: 0; margin-bottom: 24px; border-bottom: none; }
         .move-dialog .upload-modal-header { margin-bottom: 22px; }
         /* Absolutely positioned so it reserves NO space in the row: without this
            every row carried a permanent gap for a button that is usually hidden. */
         /* Flex sibling of the row, not a child: nothing can clip it and it
            needs no negative offsets. */
-        .file-item-line { display: flex; align-items: center; gap: 10px; }
+        /* The row fills the card; the button is absolutely placed just beyond the
+           card's right edge. .system-group is overflow:visible so it is not
+           clipped, which is what hid it before. */
+        .file-item-line { display: flex; align-items: center; position: relative; }
         .file-item-line > .file-item { flex: 1; min-width: 0; }
-        .move-file-btn { flex-shrink: 0; padding: 8px 18px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 600; cursor: pointer; white-space: nowrap; background: #f4f7fb; border: 1px solid #f4f7fb; color: #0a1628; transition: background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease; opacity: 0; pointer-events: none; }
+        .move-file-btn { position: absolute; left: 100%; margin-left: 18px; top: 50%; transform: translateY(-50%); padding: 8px 18px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 600; cursor: pointer; white-space: nowrap; background: #f4f7fb; border: 1px solid #f4f7fb; color: #0a1628; transition: background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease; opacity: 0; pointer-events: none; }
         .file-item-line:hover .move-file-btn, .move-file-btn:focus-visible { opacity: 1; pointer-events: auto; }
         .move-file-btn:hover { background: #ffffff; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
-        .move-file-btn:active { background: #e6ecf5; box-shadow: none; }
+        .move-file-btn:active { background: #e6ecf5; box-shadow: none; transform: translateY(-50%) scale(0.97); }
         .move-current, .move-preview { margin-bottom: 16px; }
         .move-field { margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; }
         .move-row { display: flex; gap: 14px; }
@@ -4710,7 +4717,7 @@ export default function Dashboard() {
       {moveFile && (
       <>
       <div className="upload-modal-overlay" onClick={() => !moveBusy && setMoveFile(null)} />
-      <div className="upload-modal">
+      <div className="upload-modal move-dialog">
       <div className="upload-modal-header">
         <h3>Move file</h3>
         <button className="close-btn" onClick={() => setMoveFile(null)} disabled={moveBusy}>Close</button>
