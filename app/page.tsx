@@ -2751,10 +2751,13 @@ export default function Dashboard() {
         /* The row fills the card; the button is absolutely placed just beyond the
            card's right edge. .system-group is overflow:visible so it is not
            clipped, which is what hid it before. */
-        .file-item-line { display: flex; align-items: center; position: relative; }
+        /* The line extends invisibly past the card so the gap between the row and
+           the button is still part of the hover target. Without this the button
+           vanished the moment the cursor left the row to reach it. */
+        .file-item-line { display: flex; align-items: center; position: relative; padding-right: 110px; margin-right: -110px; }
         .file-item-line > .file-item { flex: 1; min-width: 0; }
         .move-file-btn { position: absolute; left: 100%; margin-left: 18px; top: 50%; transform: translateY(-50%); padding: 8px 18px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 600; cursor: pointer; white-space: nowrap; background: #f4f7fb; border: 1px solid #f4f7fb; color: #0a1628; transition: background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease; opacity: 0; pointer-events: none; }
-        .file-item-line:hover .move-file-btn, .move-file-btn:focus-visible { opacity: 1; pointer-events: auto; }
+        .file-item-line:hover .move-file-btn, .move-file-btn:hover, .move-file-btn:focus-visible { opacity: 1; pointer-events: auto; }
         .move-file-btn:hover { background: #ffffff; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
         .move-file-btn:active { background: #e6ecf5; box-shadow: none; transform: translateY(-50%) scale(0.97); }
         .move-current, .move-preview { margin-bottom: 16px; }
