@@ -2736,8 +2736,11 @@ export default function Dashboard() {
         .file-item:hover { background: rgba(107, 164, 255, 0.06); }
         .file-item.selected { background: rgba(107, 164, 255, 0.14); border-left: 3px solid #6ba4ff; padding-left: 25px; }
         .file-item-name { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 13px; color: #ffffff; flex: 1; word-break: break-all; }
-        .move-file-btn { padding: 6px 14px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 500; cursor: pointer; white-space: nowrap; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.16); color: rgba(255,255,255,0.5); transition: all 0.15s ease; }
-        .move-file-btn:hover { background: rgba(245,200,110,0.12); border-color: rgba(245,200,110,0.4); color: #f5c86e; }
+        .move-file-btn { padding: 6px 16px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 600; cursor: pointer; white-space: nowrap; background: #f4f7fb; border: 1px solid #f4f7fb; color: #0a1628; transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease; opacity: 0; pointer-events: none; }
+        /* Revealed only while the row is hovered, so it stays out of the way. */
+        .file-item:hover .move-file-btn, .move-file-btn:focus-visible { opacity: 1; pointer-events: auto; }
+        .move-file-btn:hover { background: #ffffff; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
+        .move-file-btn:active { transform: translateY(1px); box-shadow: none; }
         .move-current, .move-preview { margin-bottom: 16px; }
         .move-field { margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; }
         .move-row { display: flex; gap: 14px; }
@@ -3098,16 +3101,6 @@ export default function Dashboard() {
                                           : isIncluded(mfMonth, file.key) ? '✓ Included' : 'Include'}
                                       </button>
                                     )}
-                                    {/* Admin only; /api/files/rename enforces requireAdmin too. */}
-                                    {authUser?.isAdmin && (
-                                      <button
-                                        className="move-file-btn"
-                                        onClick={(e) => { e.stopPropagation(); openMoveDialog(file); }}
-                                        title="Reclassify this file to a different carrier or month"
-                                      >
-                                        Move
-                                      </button>
-                                    )}
                                     <span className="file-item-meta">{formatBytes(file.size)} · {formatDate(file.lastModified)}</span>
                                     <button
                                       className="download-btn"
@@ -3121,6 +3114,19 @@ export default function Dashboard() {
                                       </svg>
                                       Download
                                     </button>
+                                    {/* Last in the row and hidden until the row is hovered:
+                                        reclassifying is rare and destructive-ish, so it should not
+                                        compete with Include and Download. Admin only; the route
+                                        enforces requireAdmin regardless. */}
+                                    {authUser?.isAdmin && (
+                                      <button
+                                        className="move-file-btn"
+                                        onClick={(e) => { e.stopPropagation(); openMoveDialog(file); }}
+                                        title="Reclassify this file to a different carrier or month"
+                                      >
+                                        Move
+                                      </button>
+                                    )}
                                   </div>
                                 </div>
                                 {selectedFile?.key === file.key && (
@@ -3994,85 +4000,86 @@ export default function Dashboard() {
             )}
 
             {/* New Month dialog */}
-            {moveFile && (
-        <>
-          <div className="upload-modal-overlay" onClick={() => !moveBusy && setMoveFile(null)} />
-          <div className="upload-modal">
-            <div className="upload-modal-header">
-              <h3>Move file</h3>
-              <button className="close-btn" onClick={() => setMoveFile(null)} disabled={moveBusy}>Close</button>
-            </div>
 
-            <div className="move-current">
-              <div className="move-label-sm">Current file</div>
-              <code className="move-filename">{moveFile.filename}</code>
-            </div>
+      {moveFile && (
+      <>
+      <div className="upload-modal-overlay" onClick={() => !moveBusy && setMoveFile(null)} />
+      <div className="upload-modal">
+      <div className="upload-modal-header">
+        <h3>Move file</h3>
+        <button className="close-btn" onClick={() => setMoveFile(null)} disabled={moveBusy}>Close</button>
+      </div>
 
-            <div className="move-field">
-              <label className="move-label-sm">File type</label>
-              <select className="consultant-month-select" value={moveLabel}
-                      onChange={(e) => setMoveLabel(e.target.value)} disabled={moveBusy}>
-                <option value="">Select a type...</option>
-                {MOVE_LABELS.map(l => <option key={l} value={l}>{l}</option>)}
-              </select>
-            </div>
+      <div className="move-current">
+        <div className="move-label-sm">Current file</div>
+        <code className="move-filename">{moveFile.filename}</code>
+      </div>
 
-            <div className="move-row">
-              <div className="move-field" style={{ flex: 1 }}>
-                <label className="move-label-sm">Month</label>
-                <select className="consultant-month-select" value={moveMonth}
-                        onChange={(e) => setMoveMonth(Number(e.target.value))} disabled={moveBusy}>
-                  {MONTH_NAMES.map((m, i) => <option key={m} value={i}>{m}</option>)}
-                </select>
-              </div>
-              <div className="move-field" style={{ flex: 1 }}>
-                <label className="move-label-sm">Year</label>
-                <select className="consultant-month-select" value={moveYear}
-                        onChange={(e) => setMoveYear(Number(e.target.value))} disabled={moveBusy}>
-                  {(() => {
-                    const now = new Date().getFullYear();
-                    const out = [];
-                    for (let y = now - 3; y <= now + 1; y++) out.push(y);
-                    return out.map(y => <option key={y} value={y}>{y}</option>);
-                  })()}
-                </select>
-              </div>
-            </div>
+      <div className="move-field">
+        <label className="move-label-sm">File type</label>
+        <select className="consultant-month-select" value={moveLabel}
+                onChange={(e) => setMoveLabel(e.target.value)} disabled={moveBusy}>
+          <option value="">Select a type...</option>
+          {MOVE_LABELS.map(l => <option key={l} value={l}>{l}</option>)}
+        </select>
+      </div>
 
-            {/* Show the resulting name before committing: the filename is what
-                drives every downstream calculation. */}
-            {moveLabel && (
-              <div className="move-preview">
-                <div className="move-label-sm">Will be renamed to</div>
-                <code className="move-filename move-filename-new">{movePreviewName()}</code>
-              </div>
-            )}
+      <div className="move-row">
+        <div className="move-field" style={{ flex: 1 }}>
+          <label className="move-label-sm">Month</label>
+          <select className="consultant-month-select" value={moveMonth}
+                  onChange={(e) => setMoveMonth(Number(e.target.value))} disabled={moveBusy}>
+            {MONTH_NAMES.map((m, i) => <option key={m} value={i}>{m}</option>)}
+          </select>
+        </div>
+        <div className="move-field" style={{ flex: 1 }}>
+          <label className="move-label-sm">Year</label>
+          <select className="consultant-month-select" value={moveYear}
+                  onChange={(e) => setMoveYear(Number(e.target.value))} disabled={moveBusy}>
+            {(() => {
+              const now = new Date().getFullYear();
+              const out = [];
+              for (let y = now - 3; y <= now + 1; y++) out.push(y);
+              return out.map(y => <option key={y} value={y}>{y}</option>);
+            })()}
+          </select>
+        </div>
+      </div>
 
-            <div className="consultant-overwrite-banner" style={{ marginTop: 14 }}>
-              <span className="consultant-overwrite-icon">&#9888;</span>
-              <span>
-                The filename decides everything downstream: which month it appears
-                under, and whether it counts toward Master, Consultant and Welfare
-                figures. If this file is currently included, that carries over.
-              </span>
-            </div>
+      {/* Show the resulting name before committing: the filename is what
+          drives every downstream calculation. */}
+      {moveLabel && (
+        <div className="move-preview">
+          <div className="move-label-sm">Will be renamed to</div>
+          <code className="move-filename move-filename-new">{movePreviewName()}</code>
+        </div>
+      )}
 
-            {moveError && <div className="consultant-error" style={{ marginTop: 14 }}>{moveError}</div>}
+      <div className="consultant-overwrite-banner" style={{ marginTop: 14 }}>
+        <span className="consultant-overwrite-icon">&#9888;</span>
+        <span>
+          The filename decides everything downstream: which month it appears
+          under, and whether it counts toward Master, Consultant and Welfare
+          figures. If this file is currently included, that carries over.
+        </span>
+      </div>
 
-            <div className="upload-modal-actions">
-              <button className="close-btn" onClick={() => setMoveFile(null)} disabled={moveBusy}>Cancel</button>
-              <button
-                className="consultant-primary-btn"
-                onClick={() => submitMove(moveError?.includes('already exists') === true)}
-                disabled={moveBusy || !moveLabel || movePreviewName() === moveFile.filename}
-              >
-                {moveBusy ? 'Moving...'
-                  : moveError?.includes('already exists') ? 'Replace existing file'
-                  : 'Move file'}
-              </button>
-            </div>
-          </div>
-        </>
+      {moveError && <div className="consultant-error" style={{ marginTop: 14 }}>{moveError}</div>}
+
+      <div className="upload-modal-actions">
+        <button className="close-btn" onClick={() => setMoveFile(null)} disabled={moveBusy}>Cancel</button>
+        <button
+          className="consultant-primary-btn"
+          onClick={() => submitMove(moveError?.includes('already exists') === true)}
+          disabled={moveBusy || !moveLabel || movePreviewName() === moveFile.filename}
+        >
+          {moveBusy ? 'Moving...'
+            : moveError?.includes('already exists') ? 'Replace existing file'
+            : 'Move file'}
+        </button>
+      </div>
+      </div>
+      </>
       )}
 
       {showNewMonthDialog && (
