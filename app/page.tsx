@@ -2736,11 +2736,15 @@ export default function Dashboard() {
         .file-item:hover { background: rgba(107, 164, 255, 0.06); }
         .file-item.selected { background: rgba(107, 164, 255, 0.14); border-left: 3px solid #6ba4ff; padding-left: 25px; }
         .file-item-name { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 13px; color: #ffffff; flex: 1; word-break: break-all; }
-        .upload-modal-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 22px; }
+        .upload-modal-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 26px; }
+        /* The move dialog reuses .upload-modal; give its contents breathing room. */
+        .move-dialog { padding: 28px 32px 26px; }
+        .move-dialog .upload-modal-header { margin-bottom: 22px; }
         /* Absolutely positioned so it reserves NO space in the row: without this
            every row carried a permanent gap for a button that is usually hidden. */
-        .move-file-btn { position: absolute; right: -14px; top: 50%; transform: translateY(-50%); z-index: 3; padding: 6px 16px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 600; cursor: pointer; white-space: nowrap; background: #f4f7fb; border: 1px solid #f4f7fb; color: #0a1628; transition: background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease; opacity: 0; pointer-events: none; }
-        .file-item { position: relative; }
+        .move-file-btn { position: absolute; right: -84px; top: 50%; transform: translateY(-50%); z-index: 3; padding: 6px 16px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 600; cursor: pointer; white-space: nowrap; background: #f4f7fb; border: 1px solid #f4f7fb; color: #0a1628; transition: background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease; opacity: 0; pointer-events: none; }
+        .file-item { position: relative; overflow: visible; }
+        .file-item-wrapper { overflow: visible; }
         /* Revealed only while the row is hovered, so it stays out of the way. */
         .file-item:hover .move-file-btn, .move-file-btn:focus-visible { opacity: 1; pointer-events: auto; }
         .move-file-btn:hover { background: #ffffff; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
@@ -4716,7 +4720,7 @@ export default function Dashboard() {
       </div>
 
       <div className="move-field">
-        <label className="move-label-sm">File type</label>
+        <label className="move-label-sm">Desired file type</label>
         <select className="consultant-month-select" value={moveLabel}
                 onChange={(e) => setMoveLabel(e.target.value)} disabled={moveBusy}>
           <option value="">Select a type...</option>
@@ -4726,14 +4730,14 @@ export default function Dashboard() {
 
       <div className="move-row">
         <div className="move-field" style={{ flex: 1 }}>
-          <label className="move-label-sm">Month</label>
+          <label className="move-label-sm">Desired month</label>
           <select className="consultant-month-select" value={moveMonth}
                   onChange={(e) => setMoveMonth(Number(e.target.value))} disabled={moveBusy}>
             {MONTH_NAMES.map((m, i) => <option key={m} value={i}>{m}</option>)}
           </select>
         </div>
         <div className="move-field" style={{ flex: 1 }}>
-          <label className="move-label-sm">Year</label>
+          <label className="move-label-sm">Desired year</label>
           <select className="consultant-month-select" value={moveYear}
                   onChange={(e) => setMoveYear(Number(e.target.value))} disabled={moveBusy}>
             {(() => {
