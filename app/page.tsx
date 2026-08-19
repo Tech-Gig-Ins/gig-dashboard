@@ -2742,13 +2742,14 @@ export default function Dashboard() {
         .move-dialog .upload-modal-header { margin-bottom: 22px; }
         /* Absolutely positioned so it reserves NO space in the row: without this
            every row carried a permanent gap for a button that is usually hidden. */
-        .move-file-btn { position: absolute; right: -84px; top: 50%; transform: translateY(-50%); z-index: 3; padding: 6px 16px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 600; cursor: pointer; white-space: nowrap; background: #f4f7fb; border: 1px solid #f4f7fb; color: #0a1628; transition: background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease; opacity: 0; pointer-events: none; }
-        .file-item { position: relative; overflow: visible; }
-        .file-item-wrapper { overflow: visible; }
-        /* Revealed only while the row is hovered, so it stays out of the way. */
-        .file-item:hover .move-file-btn, .move-file-btn:focus-visible { opacity: 1; pointer-events: auto; }
+        /* Flex sibling of the row, not a child: nothing can clip it and it
+           needs no negative offsets. */
+        .file-item-line { display: flex; align-items: center; gap: 10px; }
+        .file-item-line > .file-item { flex: 1; min-width: 0; }
+        .move-file-btn { flex-shrink: 0; padding: 8px 18px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 600; cursor: pointer; white-space: nowrap; background: #f4f7fb; border: 1px solid #f4f7fb; color: #0a1628; transition: background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease; opacity: 0; pointer-events: none; }
+        .file-item-line:hover .move-file-btn, .move-file-btn:focus-visible { opacity: 1; pointer-events: auto; }
         .move-file-btn:hover { background: #ffffff; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
-        .move-file-btn:active { transform: translateY(-50%) scale(0.97); box-shadow: none; }
+        .move-file-btn:active { background: #e6ecf5; box-shadow: none; }
         .move-current, .move-preview { margin-bottom: 16px; }
         .move-field { margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; }
         .move-row { display: flex; gap: 14px; }
@@ -3077,6 +3078,10 @@ export default function Dashboard() {
                           <ul className="file-list">
                             {monthBlock.systems[system].map((file) => (
                               <li key={file.key} className="file-item-wrapper">
+                                {/* Row and Move button are SIBLINGS on a flex line, so the
+                                    button sits outside .file-item entirely. Positioning it
+                                    inside with a negative offset let an ancestor clip it. */}
+                                <div className="file-item-line">
                                 <div
                                   className={`file-item ${selectedFile?.key === file.key ? 'selected' : ''}`}
                                   onClick={() => {
@@ -3122,20 +3127,17 @@ export default function Dashboard() {
                                       </svg>
                                       Download
                                     </button>
-                                    {/* Last in the row and hidden until the row is hovered:
-                                        reclassifying is rare and destructive-ish, so it should not
-                                        compete with Include and Download. Admin only; the route
-                                        enforces requireAdmin regardless. */}
-                                    {authUser?.isAdmin && (
-                                      <button
-                                        className="move-file-btn"
-                                        onClick={(e) => { e.stopPropagation(); openMoveDialog(file); }}
-                                        title="Reclassify this file to a different carrier or month"
-                                      >
-                                        Move
-                                      </button>
-                                    )}
                                   </div>
+                                </div>
+                                {authUser?.isAdmin && (
+                                  <button
+                                    className="move-file-btn"
+                                    onClick={(e) => { e.stopPropagation(); openMoveDialog(file); }}
+                                    title="Reclassify this file to a different carrier or month"
+                                  >
+                                    Move
+                                  </button>
+                                )}
                                 </div>
                                 {selectedFile?.key === file.key && (
                                   <div className="content-viewer">
