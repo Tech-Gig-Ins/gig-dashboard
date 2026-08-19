@@ -464,6 +464,85 @@ export default function Dashboard() {
   const [includeSaving, setIncludeSaving] = useState<Record<string, boolean>>({});
   const [includeError, setIncludeError] = useState<string>('');
 
+  // ===== Move / reclassify a file (admin only) =====
+  // Nothing reads file contents to decide what a file is: classifyFile() and
+  // detectMonthYear() both parse the FILENAME. So changing a file's carrier or
+  // month is a rename, and /api/files/rename does copy -> verify -> delete.
+  const MOVE_LABELS = [
+    'Cassena Remittance', 'Cassena Credits',
+    'GWU3 Remittance', 'GWU3 Credits',
+    'BDSB Remittance', 'BDSB Credits',
+    'Northstead Remittance', 'Northstead Credits',
+    'Gig Remittance', 'Gig Credits',
+    'EP6 Remittance', 'Enroll Confidently or PIOPAC',
+    'Corechoice T1', 'Corechoice T3',
+    'Refresh', 'Delta Dental', 'NYP Remittance',
+  ];
+  const [moveFile, setMoveFile] = useState<FileRow | null>(null);
+  const [moveLabel, setMoveLabel] = useState('');
+  const [moveMonth, setMoveMonth] = useState(new Date().getMonth());
+  const [moveYear, setMoveYear] = useState(new Date().getFullYear());
+  const [moveBusy, setMoveBusy] = useState(false);
+  const [moveError, setMoveError] = useState<string | null>(null);
+
+  function openMoveDialog(file: FileRow) {
+    const detected = detectMonthYear(file.filename);
+    setMoveFile(file);
+    setMoveLabel(classifyFile(file.filename) || '');
+    setMoveMonth(detected ? detected.month : new Date().getMonth());
+    setMoveYear(detected ? detected.year : new Date().getFullYear());
+    setMoveError(null);
+  }
+
+  // Preview of the resulting name, matching what the server builds.
+  function movePreviewName(): string {
+    if (!moveFile || !moveLabel) return '';
+    const n = moveFile.filename;
+    const dot = n.lastIndexOf('.');
+    const ext = dot >= 0 ? n.slice(dot).toLowerCase() : '';
+    return `${moveLabel} ${MONTH_NAMES[moveMonth]} ${moveYear}${ext}`;
+  }
+
+  async function submitMove(overwrite = false) {
+    if (!moveFile || !moveLabel) return;
+    setMoveBusy(true);
+    setMoveError(null);
+    try {
+      const res = await fetch('/api/files/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceKey: moveFile.key,
+          canonicalLabel: moveLabel,
+          month: moveMonth,
+          year: moveYear,
+          overwrite,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409 && !overwrite) {
+        setMoveError(`A file named "${data.conflictKey?.split('/').pop()}" already exists. Move again to replace it.`);
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || `Move failed (${res.status})`);
+      if (data.deleteError) {
+        setMoveError(`Copied, but the original could not be removed: ${data.deleteError}. Both files now exist.`);
+        return;
+      }
+      setMoveFile(null);
+      // Inclusion state moves with the file, so reload both listings.
+      setManifestMonthsLoaded(new Set());
+      setIncludedByMonth({});
+      setMasterData(null);
+      await loadAllFilesData();
+    } catch (e: any) {
+      setMoveError(e.message || 'Move failed');
+    } finally {
+      setMoveBusy(false);
+    }
+  }
+
+
   // Master dashboard state
   const [masterData, setMasterData] = useState<MasterData | null>(null);
   const [masterLoading, setMasterLoading] = useState(false);
@@ -2657,6 +2736,14 @@ export default function Dashboard() {
         .file-item:hover { background: rgba(107, 164, 255, 0.06); }
         .file-item.selected { background: rgba(107, 164, 255, 0.14); border-left: 3px solid #6ba4ff; padding-left: 25px; }
         .file-item-name { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 13px; color: #ffffff; flex: 1; word-break: break-all; }
+        .move-file-btn { padding: 6px 14px; border-radius: 8px; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 500; cursor: pointer; white-space: nowrap; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.16); color: rgba(255,255,255,0.5); transition: all 0.15s ease; }
+        .move-file-btn:hover { background: rgba(245,200,110,0.12); border-color: rgba(245,200,110,0.4); color: #f5c86e; }
+        .move-current, .move-preview { margin-bottom: 16px; }
+        .move-field { margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; }
+        .move-row { display: flex; gap: 14px; }
+        .move-label-sm { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: rgba(255,255,255,0.45); margin-bottom: 6px; display: block; }
+        .move-filename { display: block; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 12px; color: rgba(255,255,255,0.75); background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 10px 12px; word-break: break-all; }
+        .move-filename-new { color: #80d090; border-color: rgba(80,200,120,0.35); background: rgba(80,200,120,0.06); }
         .file-item-actions { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
         .file-item-meta { font-size: 12px; color: rgba(255, 255, 255, 0.4); white-space: nowrap; }
         .file-item-excluded { font-size: 10px; letter-spacing: 0.15em; font-weight: 700; color: #ff8888; background: rgba(255, 136, 136, 0.1); border: 1px solid rgba(255, 136, 136, 0.3); padding: 2px 8px; border-radius: 3px; text-transform: uppercase; white-space: nowrap; }
@@ -3009,6 +3096,16 @@ export default function Dashboard() {
                                         {includeSaving[file.key]
                                           ? '...'
                                           : isIncluded(mfMonth, file.key) ? '✓ Included' : 'Include'}
+                                      </button>
+                                    )}
+                                    {/* Admin only; /api/files/rename enforces requireAdmin too. */}
+                                    {authUser?.isAdmin && (
+                                      <button
+                                        className="move-file-btn"
+                                        onClick={(e) => { e.stopPropagation(); openMoveDialog(file); }}
+                                        title="Reclassify this file to a different carrier or month"
+                                      >
+                                        Move
                                       </button>
                                     )}
                                     <span className="file-item-meta">{formatBytes(file.size)} · {formatDate(file.lastModified)}</span>
@@ -3897,7 +3994,88 @@ export default function Dashboard() {
             )}
 
             {/* New Month dialog */}
-            {showNewMonthDialog && (
+            {moveFile && (
+        <>
+          <div className="upload-modal-overlay" onClick={() => !moveBusy && setMoveFile(null)} />
+          <div className="upload-modal">
+            <div className="upload-modal-header">
+              <h3>Move file</h3>
+              <button className="close-btn" onClick={() => setMoveFile(null)} disabled={moveBusy}>Close</button>
+            </div>
+
+            <div className="move-current">
+              <div className="move-label-sm">Current file</div>
+              <code className="move-filename">{moveFile.filename}</code>
+            </div>
+
+            <div className="move-field">
+              <label className="move-label-sm">File type</label>
+              <select className="consultant-month-select" value={moveLabel}
+                      onChange={(e) => setMoveLabel(e.target.value)} disabled={moveBusy}>
+                <option value="">Select a type...</option>
+                {MOVE_LABELS.map(l => <option key={l} value={l}>{l}</option>)}
+              </select>
+            </div>
+
+            <div className="move-row">
+              <div className="move-field" style={{ flex: 1 }}>
+                <label className="move-label-sm">Month</label>
+                <select className="consultant-month-select" value={moveMonth}
+                        onChange={(e) => setMoveMonth(Number(e.target.value))} disabled={moveBusy}>
+                  {MONTH_NAMES.map((m, i) => <option key={m} value={i}>{m}</option>)}
+                </select>
+              </div>
+              <div className="move-field" style={{ flex: 1 }}>
+                <label className="move-label-sm">Year</label>
+                <select className="consultant-month-select" value={moveYear}
+                        onChange={(e) => setMoveYear(Number(e.target.value))} disabled={moveBusy}>
+                  {(() => {
+                    const now = new Date().getFullYear();
+                    const out = [];
+                    for (let y = now - 3; y <= now + 1; y++) out.push(y);
+                    return out.map(y => <option key={y} value={y}>{y}</option>);
+                  })()}
+                </select>
+              </div>
+            </div>
+
+            {/* Show the resulting name before committing: the filename is what
+                drives every downstream calculation. */}
+            {moveLabel && (
+              <div className="move-preview">
+                <div className="move-label-sm">Will be renamed to</div>
+                <code className="move-filename move-filename-new">{movePreviewName()}</code>
+              </div>
+            )}
+
+            <div className="consultant-overwrite-banner" style={{ marginTop: 14 }}>
+              <span className="consultant-overwrite-icon">&#9888;</span>
+              <span>
+                The filename decides everything downstream: which month it appears
+                under, and whether it counts toward Master, Consultant and Welfare
+                figures. If this file is currently included, that carries over.
+              </span>
+            </div>
+
+            {moveError && <div className="consultant-error" style={{ marginTop: 14 }}>{moveError}</div>}
+
+            <div className="upload-modal-actions">
+              <button className="close-btn" onClick={() => setMoveFile(null)} disabled={moveBusy}>Cancel</button>
+              <button
+                className="consultant-primary-btn"
+                onClick={() => submitMove(moveError?.includes('already exists') === true)}
+                disabled={moveBusy || !moveLabel || movePreviewName() === moveFile.filename}
+              >
+                {moveBusy ? 'Moving...'
+                  : moveError?.includes('already exists') ? 'Replace existing file'
+                  : 'Move file'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {showNewMonthDialog && (
               <div className="consultant-modal-overlay" onClick={() => setShowNewMonthDialog(false)}>
                 <div className="consultant-modal" onClick={(e) => e.stopPropagation()}>
                   <h3>Add a New Month</h3>
