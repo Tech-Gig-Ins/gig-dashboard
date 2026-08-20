@@ -2379,6 +2379,8 @@ export default function Dashboard() {
         .dashboard-root {
           position: relative;
           min-height: 100vh;
+          /* Clears the fixed header, which no longer occupies layout space. */
+          padding-top: 74px;
           background:
             radial-gradient(ellipse at top left, rgba(50, 100, 220, 0.25), transparent 50%),
             radial-gradient(ellipse at bottom right, rgba(20, 60, 180, 0.3), transparent 50%),
@@ -2389,15 +2391,15 @@ export default function Dashboard() {
           position: fixed; inset: 0; pointer-events: none; opacity: 0.06; mix-blend-mode: overlay; z-index: 1;
           background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
         }
-        .header { position: sticky; top: 0; z-index: 50; background: rgba(10, 22, 40, 0.92); backdrop-filter: blur(20px); padding: 18px 32px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+        .header { position: fixed; top: 0; left: 0; right: 0; z-index: 50; background: rgba(8, 20, 44, 0.95); backdrop-filter: blur(24px); padding: 16px 32px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
         .brand { display: flex; align-items: center; gap: 14px; }
         .brand-mark { width: 42px; height: auto; border-radius: 8px; background: #ffffff; display: flex; align-items: center; justify-content: center; font-family: 'Fraunces', serif; font-weight: 700; font-size: 18px; color: #0a1628; padding: 3px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25); }
-        .nav-title { font-family: 'Fraunces', serif; font-size: 17px; font-weight: 600; color: #ffffff; letter-spacing: 0.01em; margin-left: 20px; padding-left: 20px; border-left: 1px solid rgba(255,255,255,0.14); white-space: nowrap; }
-        .section-rail { position: fixed; left: 0; top: 78px; bottom: 0; width: 196px; padding: 24px 14px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.015); z-index: 20; }
+        .nav-title { position: absolute; left: 50%; transform: translateX(-50%); font-family: 'Fraunces', serif; font-size: 24px; font-weight: 700; color: #ffffff; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; pointer-events: none; }
+        .section-rail { position: fixed; left: 0; top: 74px; bottom: 0; width: 196px; padding: 24px 14px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.015); z-index: 20; }
         .rail-btn { text-align: left; padding: 11px 14px; border-radius: 10px; background: transparent; border: 1px solid transparent; color: rgba(255,255,255,0.5); font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
         .rail-btn:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.85); }
         .rail-btn.active { background: rgba(107,164,255,0.14); border-color: rgba(107,164,255,0.4); color: #ffffff; }
-        .with-rail { margin-left: 196px; padding-top: 28px; }
+        .with-rail { margin-left: 196px; padding-top: 24px; }
         @media (max-width: 900px) {
         .section-rail { position: static; width: auto; flex-direction: row; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.07); }
           .with-rail { margin-left: 0; }
@@ -2880,8 +2882,12 @@ export default function Dashboard() {
             <span className="brand-fallback">G</span>
           </div>
           <span className="brand-text">Gig Workers Universe</span>
-          <span className="nav-title">GWU Internal Dashboard</span>
         </div>
+
+        {/* Centred against the header itself, not squeezed between the brand and
+            the status area, so it stays put whatever their widths are. */}
+        <span className="nav-title">GWU INTERNAL DASHBOARD</span>
+
         <div className="header-meta">
           {/* Doubles as the update indicator: a stale tab is not "operational",
               and this is the one part of the header everyone already looks at. */}
