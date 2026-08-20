@@ -14,19 +14,11 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Gig Workers Universe Internal Dashboard",
-  // Browser tab icon.
-  //
-  // The reliable route in the App Router is a file named app/icon.png - Next
-  // detects it by convention and emits the <link> tags itself. A file in
-  // public/ only works if the name and extension match exactly, which is the
-  // usual reason a favicon silently fails to appear.
-  icons: {
-    icon: [
-      { url: "/icon.png", type: "image/png" },
-      { url: "/favicon.ico" },
-    ],
-    apple: "/icon.png",
-  },
+  // No `icons` entry on purpose. Next's file convention picks up app/icon.png
+  // automatically and emits the <link> tags. Declaring icons here OVERRIDES that,
+  // and the previous version listed /favicon.ico as a fallback - which is the
+  // Next.js default file that create-next-app ships, so the framework logo kept
+  // winning in the tab.
   description: "Internal operations dashboard",
 };
 
