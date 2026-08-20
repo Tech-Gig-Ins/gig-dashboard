@@ -440,12 +440,17 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [totalFiles, setTotalFiles] = useState(0);
 
-  const [activeTab, setActiveTab] = useState<TabKey>('all-info');
+  const [activeTab, setActiveTab] = useState<TabKey>('master');
 
-  // Admins get a left rail with two sections. Enrollments holds the four
-  // existing tabs; Welfare is a single view, so it renders without a tab bar.
-  type SectionKey = 'enrollments' | 'welfare';
-  const [activeSection, setActiveSection] = useState<SectionKey>('enrollments');
+  // The left rail is the only navigation; the tab bar is gone. Welfare is
+  // admin-only and sits in the same list as the four operational views.
+  const NAV_ITEMS: Array<{ key: TabKey; label: string; adminOnly?: boolean }> = [
+    { key: 'master',     label: 'Master Dashboard' },
+    { key: 'all-info',   label: 'All Info' },
+    { key: 'consultant', label: 'Consultant Report' },
+    { key: 'billing',    label: 'Billing' },
+    { key: 'welfare',    label: 'Welfare', adminOnly: true },
+  ];
 
   // Set true when the deployed build no longer matches the one this tab loaded.
   const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -2384,14 +2389,15 @@ export default function Dashboard() {
           position: fixed; inset: 0; pointer-events: none; opacity: 0.06; mix-blend-mode: overlay; z-index: 1;
           background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
         }
-        .header { position: relative; z-index: 10; padding: 24px 32px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+        .header { position: sticky; top: 0; z-index: 50; background: rgba(10, 22, 40, 0.92); backdrop-filter: blur(20px); padding: 18px 32px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
         .brand { display: flex; align-items: center; gap: 14px; }
         .brand-mark { width: 42px; height: auto; border-radius: 8px; background: #ffffff; display: flex; align-items: center; justify-content: center; font-family: 'Fraunces', serif; font-weight: 700; font-size: 18px; color: #0a1628; padding: 3px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25); }
-        .section-rail { position: fixed; left: 0; top: 92px; bottom: 0; width: 176px; padding: 24px 14px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.015); z-index: 20; }
-        .rail-btn { text-align: left; padding: 11px 16px; border-radius: 10px; background: transparent; border: 1px solid transparent; color: rgba(255,255,255,0.5); font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
+        .nav-title { font-family: 'Fraunces', serif; font-size: 17px; font-weight: 600; color: #ffffff; letter-spacing: 0.01em; margin-left: 20px; padding-left: 20px; border-left: 1px solid rgba(255,255,255,0.14); white-space: nowrap; }
+        .section-rail { position: fixed; left: 0; top: 78px; bottom: 0; width: 196px; padding: 24px 14px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.015); z-index: 20; }
+        .rail-btn { text-align: left; padding: 11px 14px; border-radius: 10px; background: transparent; border: 1px solid transparent; color: rgba(255,255,255,0.5); font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
         .rail-btn:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.85); }
         .rail-btn.active { background: rgba(107,164,255,0.14); border-color: rgba(107,164,255,0.4); color: #ffffff; }
-        .with-rail { margin-left: 176px; }
+        .with-rail { margin-left: 196px; padding-top: 28px; }
         @media (max-width: 900px) {
         .section-rail { position: static; width: auto; flex-direction: row; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.07); }
           .with-rail { margin-left: 0; }
@@ -2874,6 +2880,7 @@ export default function Dashboard() {
             <span className="brand-fallback">G</span>
           </div>
           <span className="brand-text">Gig Workers Universe</span>
+          <span className="nav-title">GWU Internal Dashboard</span>
         </div>
         <div className="header-meta">
           {/* Doubles as the update indicator: a stale tab is not "operational",
@@ -2909,41 +2916,24 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Admin-only section rail. Non-admins never see it and keep the plain
-          tabbed layout, since Welfare is the only extra section. */}
-      {authUser?.isAdmin && (
-        <nav className="section-rail">
-          <button className={`rail-btn ${activeSection === 'enrollments' ? 'active' : ''}`}
-                  onClick={() => setActiveSection('enrollments')}>Enrollments</button>
-          <button className={`rail-btn ${activeSection === 'welfare' ? 'active' : ''}`}
-                  onClick={() => setActiveSection('welfare')}>Welfare</button>
-        </nav>
-      )}
+      {/* The only navigation. Replaces the old tab bar entirely. */}
+      <nav className="section-rail">
+        {NAV_ITEMS.filter(n => !n.adminOnly || authUser?.isAdmin).map(n => (
+          <button
+            key={n.key}
+            className={`rail-btn ${activeTab === n.key ? 'active' : ''}`}
+            onClick={() => setActiveTab(n.key)}
+          >
+            {n.label}
+          </button>
+        ))}
+      </nav>
 
-      <div className={authUser?.isAdmin ? 'with-rail' : ''}>
-      <section className="hero">
-        <div className="eyebrow">Internal Operations</div>
-        <h1 className="title">
-          Gig Workers Universe <span className="title-accent">Internal Dashboard</span>
-        </h1>
-      </section>
-
-      {/* Tabs */}
-      {activeSection === 'enrollments' && (
-      <section className="tabs-section">
-        <div className="tabs-pill">
-          <button className={`tab-btn ${activeTab === 'master' ? 'active' : ''}`} onClick={() => setActiveTab('master')}>Master Dashboard</button>
-          <button className={`tab-btn ${activeTab === 'all-info' ? 'active' : ''}`} onClick={() => setActiveTab('all-info')}>All Info</button>
-          <button className={`tab-btn ${activeTab === 'consultant' ? 'active' : ''}`} onClick={() => setActiveTab('consultant')}>Consultant Report</button>
-          <button className={`tab-btn ${activeTab === 'billing' ? 'active' : ''}`} onClick={() => setActiveTab('billing')}>Billing</button>
-
-        </div>
-      </section>
-      )}
+      <div className="with-rail">
 
       <section className="content-section">
         {/* ALL INFO TAB */}
-        {activeSection === 'enrollments' && activeTab === 'all-info' && (
+        {activeTab === 'all-info' && (
           <>
             <div className="search-bar">
               <div className="search-wrapper">
@@ -3255,7 +3245,7 @@ export default function Dashboard() {
         )}
 
         {/* MASTER DASHBOARD TAB */}
-        {activeSection === 'enrollments' && activeTab === 'master' && (
+        {activeTab === 'master' && (
           <>
             <div className="search-bar">
               <div className="search-wrapper">
@@ -3749,7 +3739,7 @@ export default function Dashboard() {
         )}
 
         {/* ==================== CONSULTANT REPORT TAB ==================== */}
-        {activeSection === 'enrollments' && activeTab === 'consultant' && (
+        {activeTab === 'consultant' && (
           <div className="consultant-dashboard">
             {/* Header: title + month selector + actions */}
             <div className="consultant-header-row">
@@ -4116,7 +4106,7 @@ export default function Dashboard() {
         )}
 
         {/* ==================== BILLING TAB ==================== */}
-        {authUser?.isAdmin && activeSection === 'welfare' && (
+        {authUser?.isAdmin && activeTab === 'welfare' && (
           <div className="tab-panel">
             <div className="consultant-header">
               <div>
@@ -4227,7 +4217,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        {activeSection === 'enrollments' && activeTab === 'billing' && (
+        {activeTab === 'billing' && (
           <div className="billing-dashboard">
             {billingLoading && <div className="loading-state">Loading file...</div>}
             {billingError && <div className="error-state">Error: {billingError}</div>}
