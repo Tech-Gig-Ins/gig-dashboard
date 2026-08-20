@@ -14,11 +14,12 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Gig Workers Universe Internal Dashboard",
-  // No `icons` entry on purpose. Next's file convention picks up app/icon.png
-  // automatically and emits the <link> tags. Declaring icons here OVERRIDES that,
-  // and the previous version listed /favicon.ico as a fallback - which is the
-  // Next.js default file that create-next-app ships, so the framework logo kept
-  // winning in the tab.
+  // Points explicitly at public/icon.png, served at /icon.png.
+  //
+  // Next's file convention (app/icon.png) is NOT used here, so app/icon.png must
+  // not exist: if it does, Next emits its own <link> alongside this one and the
+  // browser can pick either.
+  icons: { icon: "/icon.png" },
   description: "Internal operations dashboard",
 };
 
