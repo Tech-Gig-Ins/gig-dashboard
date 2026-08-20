@@ -14,6 +14,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Gig Workers Universe Internal Dashboard",
+  // Browser tab icon. Drop your image at public/favicon.png (square, 64x64+).
+  icons: { icon: "/favicon.png" },
   description: "Internal operations dashboard",
 };
 

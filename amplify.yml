@@ -6,22 +6,15 @@ frontend:
         - npm ci
     build:
       commands:
-        # --- expose console env vars to the Next.js SSR runtime --------------
-        # Amplify gives console variables to the BUILD shell, but for Next.js
-        # SSR they do not reliably survive into the server runtime. Writing them
-        # to .env.production makes Next.js read them at runtime.
-        #
-        # The pattern below MUST cover every variable the app reads. Missing one
-        # fails at RUNTIME, not at build time: dropping MY_AWS_* produced
-        # "Resolved credential object is not valid" on every S3 call while the
-        # build itself stayed green.
-        #
-        # Keep in sync with:
-        #   grep -rho "process\.env\.[A-Z_0-9]*" app/ lib/ | sort -u
+        # Expose console env vars to the Next.js SSR runtime. Every variable the
+        # app reads must be covered here; a miss fails at RUNTIME, not build.
         - echo "=== variable NAMES visible to the build (values never printed) ==="
         - env | grep -E '^(MY_AWS_|S3_|COGNITO_|APP_URL|ALLOWED_EMAIL_DOMAIN|ADMIN_EMAILS|CONSULTANT_LAMBDA_NAME|BILLING_LAMBDA_NAME)' | cut -d= -f1 | sort || echo "NONE MATCHED"
         - echo "================================================================"
         - env | grep -E '^(MY_AWS_|S3_|COGNITO_|APP_URL=|ALLOWED_EMAIL_DOMAIN=|ADMIN_EMAILS=|CONSULTANT_LAMBDA_NAME=|BILLING_LAMBDA_NAME=)' >> .env.production || true
+        # Unique per deploy. /api/version serves this, the browser polls it, and
+        # a change means the open tab is running stale code.
+        - echo "BUILD_ID=$(date +%s)" >> .env.production
         - echo "wrote $(wc -l < .env.production 2>/dev/null || echo 0) vars to .env.production"
         - npm run build
   artifacts:

@@ -442,6 +442,14 @@ export default function Dashboard() {
 
   const [activeTab, setActiveTab] = useState<TabKey>('all-info');
 
+  // Admins get a left rail with two sections. Enrollments holds the four
+  // existing tabs; Welfare is a single view, so it renders without a tab bar.
+  type SectionKey = 'enrollments' | 'welfare';
+  const [activeSection, setActiveSection] = useState<SectionKey>('enrollments');
+
+  // Set true when the deployed build no longer matches the one this tab loaded.
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+
   const [selectedFile, setSelectedFile] = useState<FileRow | null>(null);
   const [fileContent, setFileContent] = useState<FileContent | null>(null);
   const [contentLoading, setContentLoading] = useState(false);
@@ -889,6 +897,33 @@ export default function Dashboard() {
       return res;
     };
     return () => { window.fetch = original; };
+  }, []);
+
+  // Notice new deployments. The dashboard is left open for hours, so without
+  // this a user can keep working against stale JavaScript after a release.
+  useEffect(() => {
+    let loadedBuild: string | null = null;
+    let stopped = false;
+
+    const check = async () => {
+      try {
+        const res = await fetch('/api/version', { cache: 'no-store' });
+        if (!res.ok) return;
+        const { buildId } = await res.json();
+        if (!buildId) return;
+        if (loadedBuild === null) { loadedBuild = buildId; return; }
+        if (buildId !== loadedBuild && !stopped) setUpdateAvailable(true);
+      } catch {
+        // Offline or mid-deploy. Try again on the next tick.
+      }
+    };
+
+    check();
+    const timer = setInterval(check, 60_000);
+    // Catch it immediately when someone returns to the tab.
+    const onFocus = () => check();
+    window.addEventListener('focus', onFocus);
+    return () => { stopped = true; clearInterval(timer); window.removeEventListener('focus', onFocus); };
   }, []);
 
   useEffect(() => {
@@ -2349,9 +2384,21 @@ export default function Dashboard() {
           position: fixed; inset: 0; pointer-events: none; opacity: 0.06; mix-blend-mode: overlay; z-index: 1;
           background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
         }
-        .header { position: relative; z-index: 10; padding: 32px 56px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+        .header { position: relative; z-index: 10; padding: 24px 32px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
         .brand { display: flex; align-items: center; gap: 14px; }
         .brand-mark { width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg, #4d8eff 0%, #1546c4 100%); display: flex; align-items: center; justify-content: center; font-family: 'Fraunces', serif; font-weight: 700; font-size: 18px; box-shadow: 0 8px 24px rgba(77, 142, 255, 0.4); }
+        .section-rail { position: fixed; left: 0; top: 92px; bottom: 0; width: 176px; padding: 24px 14px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.015); z-index: 20; }
+        .rail-btn { text-align: left; padding: 11px 16px; border-radius: 10px; background: transparent; border: 1px solid transparent; color: rgba(255,255,255,0.5); font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
+        .rail-btn:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.85); }
+        .rail-btn.active { background: rgba(107,164,255,0.14); border-color: rgba(107,164,255,0.4); color: #ffffff; }
+        .with-rail { margin-left: 176px; }
+        @media (max-width: 900px) {
+        .section-rail { position: static; width: auto; flex-direction: row; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.07); }
+          .with-rail { margin-left: 0; }
+        }
+        .brand-logo { width: 100%; height: 100%; object-fit: contain; border-radius: 10px; position: relative; z-index: 1; }
+        .brand-fallback { position: absolute; }
+        .brand-mark { position: relative; overflow: hidden; }
         .brand-text { font-size: 13px; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(255, 255, 255, 0.7); font-weight: 500; }
         .user-chip { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; padding-left: 20px; border-left: 1px solid rgba(255,255,255,0.12); }
         .user-chip-main { display: flex; align-items: center; gap: 8px; }
@@ -2363,15 +2410,18 @@ export default function Dashboard() {
         .signout-btn:hover { color: #ffffff; border-color: rgba(255,136,136,0.5); background: rgba(255,136,136,0.08); }
         .header-meta { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(255, 255, 255, 0.4); display: flex; gap: 24px; align-items: center; }
         .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 12px rgba(74, 222, 128, 0.6); animation: pulse 2s ease-in-out infinite; }
+        .status-dot.stale { background: #ff6b6b; box-shadow: 0 0 12px rgba(255, 107, 107, 0.7); }
+        .status-update-btn { background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; font-size: inherit; letter-spacing: inherit; text-transform: inherit; color: #ff6b6b; font-weight: 600; }
+        .status-update-btn:hover { color: #ffffff; text-decoration: underline; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-        .hero { position: relative; z-index: 10; padding: 80px 56px 40px; max-width: 1400px; margin: 0 auto; }
+        .hero { position: relative; z-index: 10; padding: 64px 32px 32px; max-width: 1800px; margin: 0 auto; }
         .eyebrow { font-size: 12px; letter-spacing: 0.3em; text-transform: uppercase; color: #6ba4ff; margin-bottom: 24px; opacity: 0; transform: translateY(20px); animation: ${mounted ? 'fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards' : 'none'}; }
         .title { font-family: 'Fraunces', serif; font-size: clamp(40px, 6vw, 72px); font-weight: 500; letter-spacing: -0.03em; line-height: 0.95; margin: 0; color: #ffffff; opacity: 0; transform: translateY(30px); animation: ${mounted ? 'fadeUp 1s cubic-bezier(0.16, 1, 0.3, 1) 0.25s forwards' : 'none'}; }
         .title-accent { font-style: italic; color: #6ba4ff; font-weight: 400; }
         @keyframes fadeUp { to { opacity: 1; transform: translateY(0); } }
 
-        .tabs-section { position: relative; z-index: 10; padding: 0 56px; max-width: 1400px; margin: 0 auto 24px; }
+        .tabs-section { position: relative; z-index: 10; padding: 0 32px; max-width: 1800px; margin: 0 auto 24px; }
         .tabs-pill { display: inline-flex; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 999px; padding: 6px; gap: 4px; backdrop-filter: blur(20px); }
         .welfare-notes { background: rgba(107,164,255,0.05); border: 1px solid rgba(107,164,255,0.2); border-radius: 10px; padding: 18px 22px; margin-bottom: 22px; }
         .welfare-notes-title { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(107,164,255,0.9); font-weight: 600; margin-bottom: 12px; }
@@ -2388,7 +2438,7 @@ export default function Dashboard() {
         .tab-btn:hover { color: #ffffff; }
         .tab-btn.active { background: linear-gradient(135deg, #4d8eff 0%, #1546c4 100%); color: #ffffff; box-shadow: 0 4px 16px rgba(77, 142, 255, 0.3); }
 
-        .search-bar { position: relative; max-width: 1400px; margin: 0 auto 32px; padding: 0 56px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .search-bar { position: relative; max-width: 1800px; margin: 0 auto 32px; padding: 0 32px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
         .search-wrapper { position: relative; flex: 1; min-width: 280px; }
         .search-input { width: 100%; padding: 16px 24px 16px 56px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 16px; color: #ffffff; font-size: 15px; font-family: 'Inter', sans-serif; backdrop-filter: blur(20px); transition: all 0.2s ease; outline: none; }
         .search-input:focus { border-color: rgba(107, 164, 255, 0.5); background: rgba(255, 255, 255, 0.08); box-shadow: 0 0 0 4px rgba(107, 164, 255, 0.1); }
@@ -2437,7 +2487,7 @@ export default function Dashboard() {
         select.filter-input { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='rgba(255,255,255,0.5)' d='M6 8L0 0h12z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; padding-right: 40px; }
         select.filter-input option { background: #0a1f4d; color: #ffffff; }
 
-        .content-section { position: relative; z-index: 10; padding: 0 56px 200px; max-width: 1400px; margin: 0 auto; }
+        .content-section { position: relative; z-index: 10; padding: 0 32px 200px; max-width: 1800px; margin: 0 auto; }
 
         .coming-soon { padding: 100px 40px; text-align: center; background: rgba(255, 255, 255, 0.02); border: 1px dashed rgba(255, 255, 255, 0.15); border-radius: 16px; }
         .coming-soon h2 { font-family: 'Fraunces', serif; font-size: 36px; font-weight: 500; color: rgba(255, 255, 255, 0.7); margin: 0 0 12px; }
@@ -2813,14 +2863,30 @@ export default function Dashboard() {
 
       <div className="grain" />
 
+
       <header className="header">
         <div className="brand">
-          <div className="brand-mark">G</div>
+          {/* Replace /public/logo.png with your image (square, 128x128 or larger).
+              Falls back to the "G" mark if the file is missing. */}
+          <div className="brand-mark">
+            <img src="/logo.png" alt="Gig Workers Universe" className="brand-logo"
+                 onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
+            <span className="brand-fallback">G</span>
+          </div>
           <span className="brand-text">Gig Workers Universe</span>
         </div>
         <div className="header-meta">
-          <span className="status-dot" />
-          <span>System Operational</span>
+          {/* Doubles as the update indicator: a stale tab is not "operational",
+              and this is the one part of the header everyone already looks at. */}
+          <span className={`status-dot ${updateAvailable ? 'stale' : ''}`} />
+          {updateAvailable ? (
+            <button className="status-update-btn" onClick={() => window.location.reload()}
+                    title="Reload to load the latest version">
+              System Update Required
+            </button>
+          ) : (
+            <span>System Operational</span>
+          )}
 
           {/* Signed-in identity. Sourced from /api/auth/me, which reads the
               verified id token server-side. The ADMIN badge is presentation
@@ -2843,6 +2909,18 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {/* Admin-only section rail. Non-admins never see it and keep the plain
+          tabbed layout, since Welfare is the only extra section. */}
+      {authUser?.isAdmin && (
+        <nav className="section-rail">
+          <button className={`rail-btn ${activeSection === 'enrollments' ? 'active' : ''}`}
+                  onClick={() => setActiveSection('enrollments')}>Enrollments</button>
+          <button className={`rail-btn ${activeSection === 'welfare' ? 'active' : ''}`}
+                  onClick={() => setActiveSection('welfare')}>Welfare</button>
+        </nav>
+      )}
+
+      <div className={authUser?.isAdmin ? 'with-rail' : ''}>
       <section className="hero">
         <div className="eyebrow">Internal Operations</div>
         <h1 className="title">
@@ -2851,22 +2929,21 @@ export default function Dashboard() {
       </section>
 
       {/* Tabs */}
+      {activeSection === 'enrollments' && (
       <section className="tabs-section">
         <div className="tabs-pill">
           <button className={`tab-btn ${activeTab === 'master' ? 'active' : ''}`} onClick={() => setActiveTab('master')}>Master Dashboard</button>
           <button className={`tab-btn ${activeTab === 'all-info' ? 'active' : ''}`} onClick={() => setActiveTab('all-info')}>All Info</button>
           <button className={`tab-btn ${activeTab === 'consultant' ? 'active' : ''}`} onClick={() => setActiveTab('consultant')}>Consultant Report</button>
           <button className={`tab-btn ${activeTab === 'billing' ? 'active' : ''}`} onClick={() => setActiveTab('billing')}>Billing</button>
-          {/* Admin only. /api/welfare enforces requireAdmin regardless. */}
-          {authUser?.isAdmin && (
-            <button className={`tab-btn ${activeTab === 'welfare' ? 'active' : ''}`} onClick={() => setActiveTab('welfare')}>Welfare</button>
-          )}
+
         </div>
       </section>
+      )}
 
       <section className="content-section">
         {/* ALL INFO TAB */}
-        {activeTab === 'all-info' && (
+        {activeSection === 'enrollments' && activeTab === 'all-info' && (
           <>
             <div className="search-bar">
               <div className="search-wrapper">
@@ -3178,7 +3255,7 @@ export default function Dashboard() {
         )}
 
         {/* MASTER DASHBOARD TAB */}
-        {activeTab === 'master' && (
+        {activeSection === 'enrollments' && activeTab === 'master' && (
           <>
             <div className="search-bar">
               <div className="search-wrapper">
@@ -3672,7 +3749,7 @@ export default function Dashboard() {
         )}
 
         {/* ==================== CONSULTANT REPORT TAB ==================== */}
-        {activeTab === 'consultant' && (
+        {activeSection === 'enrollments' && activeTab === 'consultant' && (
           <div className="consultant-dashboard">
             {/* Header: title + month selector + actions */}
             <div className="consultant-header-row">
@@ -4039,7 +4116,7 @@ export default function Dashboard() {
         )}
 
         {/* ==================== BILLING TAB ==================== */}
-        {activeTab === 'welfare' && (
+        {authUser?.isAdmin && activeSection === 'welfare' && (
           <div className="tab-panel">
             <div className="consultant-header">
               <div>
@@ -4150,7 +4227,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        {activeTab === 'billing' && (
+        {activeSection === 'enrollments' && activeTab === 'billing' && (
           <div className="billing-dashboard">
             {billingLoading && <div className="loading-state">Loading file...</div>}
             {billingError && <div className="error-state">Error: {billingError}</div>}
@@ -4780,6 +4857,7 @@ export default function Dashboard() {
       </>
       )}
 
+      </div>
     </main>
   );
 }
