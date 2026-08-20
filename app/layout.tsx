@@ -14,8 +14,19 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Gig Workers Universe Internal Dashboard",
-  // Browser tab icon. Drop your image at public/favicon.png (square, 64x64+).
-  icons: { icon: "/favicon.png" },
+  // Browser tab icon.
+  //
+  // The reliable route in the App Router is a file named app/icon.png - Next
+  // detects it by convention and emits the <link> tags itself. A file in
+  // public/ only works if the name and extension match exactly, which is the
+  // usual reason a favicon silently fails to appear.
+  icons: {
+    icon: [
+      { url: "/icon.png", type: "image/png" },
+      { url: "/favicon.ico" },
+    ],
+    apple: "/icon.png",
+  },
   description: "Internal operations dashboard",
 };
 

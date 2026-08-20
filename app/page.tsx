@@ -2386,7 +2386,7 @@ export default function Dashboard() {
         }
         .header { position: relative; z-index: 10; padding: 24px 32px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
         .brand { display: flex; align-items: center; gap: 14px; }
-        .brand-mark { width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg, #4d8eff 0%, #1546c4 100%); display: flex; align-items: center; justify-content: center; font-family: 'Fraunces', serif; font-weight: 700; font-size: 18px; box-shadow: 0 8px 24px rgba(77, 142, 255, 0.4); }
+        .brand-mark { width: 42px; height: 42px; border-radius: 10px; background: #ffffff; display: flex; align-items: center; justify-content: center; font-family: 'Fraunces', serif; font-weight: 700; font-size: 18px; color: #0a1628; padding: 5px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25); }
         .section-rail { position: fixed; left: 0; top: 92px; bottom: 0; width: 176px; padding: 24px 14px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.015); z-index: 20; }
         .rail-btn { text-align: left; padding: 11px 16px; border-radius: 10px; background: transparent; border: 1px solid transparent; color: rgba(255,255,255,0.5); font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
         .rail-btn:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.85); }
@@ -2396,7 +2396,7 @@ export default function Dashboard() {
         .section-rail { position: static; width: auto; flex-direction: row; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.07); }
           .with-rail { margin-left: 0; }
         }
-        .brand-logo { width: 100%; height: 100%; object-fit: contain; border-radius: 10px; position: relative; z-index: 1; }
+        .brand-logo { width: 100%; height: 100%; object-fit: contain; position: relative; z-index: 1; display: block; }
         .brand-fallback { position: absolute; }
         .brand-mark { position: relative; overflow: hidden; }
         .brand-text { font-size: 13px; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(255, 255, 255, 0.7); font-weight: 500; }
