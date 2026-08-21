@@ -2469,8 +2469,9 @@ export default function Dashboard() {
         /* Filter drawer */
         .filter-overlay { position: fixed; inset: 0; background: rgba(5, 20, 51, 0.6); backdrop-filter: blur(4px); z-index: 100; animation: fadeIn 0.2s ease; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        .filter-drawer { position: fixed; top: 0; left: 0; bottom: 0; width: 420px; max-width: 90vw; background: linear-gradient(180deg, #0a1f4d 0%, #061a3f 100%); border-right: 1px solid rgba(107, 164, 255, 0.2); box-shadow: 8px 0 40px rgba(0, 0, 0, 0.5); z-index: 101; display: flex; flex-direction: column; animation: slideInLeft 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
-        @keyframes slideInLeft { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+        .filter-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 420px; max-width: 90vw; background: linear-gradient(180deg, #0a1f4d 0%, #061a3f 100%); border-left: 1px solid rgba(107, 164, 255, 0.2); box-shadow: -8px 0 40px rgba(0, 0, 0, 0.5); z-index: 101; display: flex; flex-direction: column; animation: slideInRight 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+        @keyframes slideInLeft { from { transform: translateX(-100%); } to { transform: translateX(0); }
+        @keyframes slideInRight { from { transform: translateX(100%); } to { transform: translateX(0); } } }
         .filter-drawer-header { padding: 24px 28px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); display: flex; justify-content: space-between; align-items: center; }
         .filter-drawer-header h3 { font-family: 'Fraunces', serif; font-size: 22px; font-weight: 500; color: #ffffff; margin: 0; letter-spacing: -0.01em; }
         .filter-drawer-body { flex: 1; overflow-y: auto; padding: 24px 28px; }
