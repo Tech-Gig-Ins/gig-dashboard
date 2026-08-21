@@ -492,7 +492,11 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
     // none of the three lookups above cover, so its rows had no group either.
     const clientGroupIdx = findCol(headers, ['client group', 'group name'], true);
 
-    const planNameIdx = findCol(headers, ['plan name', 'class/plan', 'class plan']);
+    const planNameIdx = findCol(headers, ['plan name', 'class/plan', 'class plan', 'plan']);
+    // Refresh splits the product across two columns: Vendor ("Gig Medical") and
+    // Plan ("ASO Plan"). Neither alone identifies the coverage, so they are
+    // joined for display. Other sources have no Vendor column and are unaffected.
+    const vendorIdx = findCol(headers, ['vendor', 'vendor name'], true);
     const anthemIdIdx = findCol(headers, ['anthem id']);
     // 'price' is the Refresh export's amount column; without it every Refresh
     // row showed '-' in the Payment column.
@@ -503,7 +507,7 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
     const address2Idx = findCol(headers, ['address 2', 'address2', 'address line 2']);
     const emailIdx = findCol(headers, ['email address', 'email']);
     const phoneIdx = findCol(headers, ['phone number', 'phone']);
-    const coverageIdx = findCol(headers, ['coverage tier', 'coverage type']);
+    const coverageIdx = findCol(headers, ['coverage tier', 'coverage type', 'tier']);
 
     const records: MemberRecord[] = [];
 
@@ -521,7 +525,12 @@ async function extractFromFile(key: string): Promise<MemberRecord[]> {
         normalizedName,
         group: group || '-',
         normalizedGroup,
-        planName: getCell(row, planNameIdx) || '-',
+        planName: (() => {
+          const plan = getCell(row, planNameIdx);
+          const vendor = getCell(row, vendorIdx);
+          if (vendor && plan) return `${vendor} - ${plan}`;
+          return plan || vendor || '-';
+        })(),
         anthemId: getCell(row, anthemIdIdx) || '-',
         payment: formatPayment(getCell(row, welfareIdx)),
         city: getCell(row, cityIdx) || '-',
