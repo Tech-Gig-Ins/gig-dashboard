@@ -18,7 +18,7 @@ import { NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { randomUUID } from 'crypto';
 
-import { requireAdmin, requireAuth } from '@/lib/auth';
+import { requireAuth } from '@/lib/auth';
 const s3 = new S3Client({
   region: process.env.MY_AWS_REGION || 'us-east-1',
   credentials: {
@@ -122,7 +122,10 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   // Auth boundary. proxy.ts only does an optimistic cookie check;
   // this is what actually verifies the token and role.
-  const gate = await requireAdmin(request);
+  // Any signed-in user may post an update. Posting a note or attaching a file
+  // is collaboration, not a privileged action; APPROVING which file the month
+  // displays stays admin-only (see billing/approve).
+  const gate = await requireAuth(request);
   if (gate instanceof NextResponse) return gate;
 
   try {
