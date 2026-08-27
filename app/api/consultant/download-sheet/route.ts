@@ -66,15 +66,15 @@ function tabKey(title: string): string {
 }
 
 // True for the individual FNA team tabs: "\u{1F464} FNA - HUND", "\u{1F464} FNA - KOBI", etc.
+// The dash after FNA is what tells these apart from the combined report tab.
 function isFnaTeamTab(title: string): boolean {
   const bare = String(title || '').replace(/[^\x20-\x7E]/g, '').trim();
   return /^FNA\s*-\s*\S/i.test(bare);
 }
 
-// The combined "FNA Full Report" tab. No dash after FNA, which is what tells it
-// apart from the per-person tabs above. It ships as the FIRST sheet of the FNA
-// download so the team total is what opens, with the individual breakdowns
-// behind it.
+// The combined "\u{1F536} FNA Full Report" tab. No dash after FNA. It ships as the
+// FIRST sheet of the FNA download so the team total is what opens, with the
+// individual breakdowns behind it.
 function isFnaFullReportTab(title: string): boolean {
   const bare = String(title || '').replace(/[^\x20-\x7E]/g, '').trim();
   return /^FNA\s+Full\s+Report/i.test(bare);
@@ -120,14 +120,13 @@ export async function GET(req: NextRequest) {
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buf as any);
 
-    // "FNA" is a team, not a person: it collects every "FNA - <name>" tab into a
-    // single workbook, each sheet keeping its original name. Every other value
-    // resolves to exactly one tab.
+    // "FNA" is a team, not a person: it collects the FNA Full Report tab plus
+    // every "FNA - <name>" tab into a single workbook, each sheet keeping its
+    // original name. Every other value resolves to exactly one tab.
     const isTeamFna = tabKey(consultant) === 'fna';
 
     let keep: typeof wb.worksheets;
     if (isTeamFna) {
-      // Full Report first, then each person's tab.
       const full = wb.worksheets.filter(ws => isFnaFullReportTab(ws.name));
       const people = wb.worksheets.filter(ws => isFnaTeamTab(ws.name));
       keep = [...full, ...people];
@@ -157,9 +156,9 @@ export async function GET(req: NextRequest) {
     for (const id of doomed) wb.removeWorksheet(id);
 
     // removeWorksheet preserves the workbook's ORIGINAL tab order, so building
-    // `keep` in the order we want is not enough: FNA Full Report sits after the
-    // per-person tabs in the source and came out last. orderNo forces it.
-    keep.forEach((ws, i) => { ws.orderNo = i + 1; });
+    // `keep` in the wanted order is not enough: FNA Full Report sits after the
+    // per-person tabs in the source and would come out last. orderNo forces it.
+    keep.forEach((ws, i) => { (ws as any).orderNo = i + 1; });
 
     const out = await wb.xlsx.writeBuffer();
     const filename = safeFilename(`${isTeamFna ? 'FNA' : consultant} Report ${month}.xlsx`);
