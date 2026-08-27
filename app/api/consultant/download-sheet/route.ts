@@ -66,11 +66,18 @@ function tabKey(title: string): string {
 }
 
 // True for the individual FNA team tabs: "\u{1F464} FNA - HUND", "\u{1F464} FNA - KOBI", etc.
-// Deliberately does NOT match the shared "\u{1F536} FNA Full Report" tab, which
-// has no dash and belongs to the full workbook only.
 function isFnaTeamTab(title: string): boolean {
   const bare = String(title || '').replace(/[^\x20-\x7E]/g, '').trim();
   return /^FNA\s*-\s*\S/i.test(bare);
+}
+
+// The combined "FNA Full Report" tab. No dash after FNA, which is what tells it
+// apart from the per-person tabs above. It ships as the FIRST sheet of the FNA
+// download so the team total is what opens, with the individual breakdowns
+// behind it.
+function isFnaFullReportTab(title: string): boolean {
+  const bare = String(title || '').replace(/[^\x20-\x7E]/g, '').trim();
+  return /^FNA\s+Full\s+Report/i.test(bare);
 }
 
 // Windows forbids \ / : * ? " < > | in filenames.
@@ -120,7 +127,10 @@ export async function GET(req: NextRequest) {
 
     let keep: typeof wb.worksheets;
     if (isTeamFna) {
-      keep = wb.worksheets.filter(ws => isFnaTeamTab(ws.name));
+      // Full Report first, then each person's tab.
+      const full = wb.worksheets.filter(ws => isFnaFullReportTab(ws.name));
+      const people = wb.worksheets.filter(ws => isFnaTeamTab(ws.name));
+      keep = [...full, ...people];
       if (keep.length === 0) {
         return NextResponse.json({
           error: `No FNA team tabs in the ${month} report.`,
@@ -145,6 +155,11 @@ export async function GET(req: NextRequest) {
     const keepIds = new Set(keep.map(ws => ws.id));
     const doomed = wb.worksheets.filter(ws => !keepIds.has(ws.id)).map(ws => ws.id);
     for (const id of doomed) wb.removeWorksheet(id);
+
+    // removeWorksheet preserves the workbook's ORIGINAL tab order, so building
+    // `keep` in the order we want is not enough: FNA Full Report sits after the
+    // per-person tabs in the source and came out last. orderNo forces it.
+    keep.forEach((ws, i) => { ws.orderNo = i + 1; });
 
     const out = await wb.xlsx.writeBuffer();
     const filename = safeFilename(`${isTeamFna ? 'FNA' : consultant} Report ${month}.xlsx`);
