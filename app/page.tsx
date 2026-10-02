@@ -668,6 +668,12 @@ export default function Dashboard() {
   // never sees dashboard chrome or triggers data fetches.
   const [authChecked, setAuthChecked] = useState(false);
 
+  // Technical controls - uploads, Move, billing approve, reset - are open to
+  // platform admins as well as admins; the server's requireAdmin accepts both.
+  // The Welfare GRANT panel deliberately stays strictly isAdmin, or a platform
+  // admin could grant themselves the access this separation exists to withhold.
+  const canManage = Boolean(authUser?.isAdmin || authUser?.isPlatformAdmin);
+
   // ===== Welfare (NYP wire) tab =====
   type WelfareRow = {
     label: string; capRate: number; creditRate: number; mapped: boolean;
@@ -2518,6 +2524,7 @@ export default function Dashboard() {
         .user-chip-name { font-size: 13px; letter-spacing: 0.04em; text-transform: none; color: #ffffff; font-weight: 500; }
         .user-chip-email { font-size: 11px; letter-spacing: 0.02em; text-transform: none; color: rgba(255,255,255,0.4); }
         .user-badge-admin { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: #80d090; background: rgba(80,200,120,0.12); border: 1px solid rgba(80,200,120,0.4); padding: 2px 7px; border-radius: 3px; }
+        .user-badge-platform { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: #c9a3ff; background: rgba(201,163,255,0.12); border: 1px solid rgba(201,163,255,0.4); padding: 2px 7px; border-radius: 3px; }
         .user-badge-viewer { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: rgba(107,164,255,0.9); background: rgba(107,164,255,0.1); border: 1px solid rgba(107,164,255,0.35); padding: 2px 7px; border-radius: 3px; }
         .signout-btn { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.55); border: 1px solid rgba(255,255,255,0.16); border-radius: 6px; padding: 6px 14px; text-decoration: none; transition: all 0.15s ease; white-space: nowrap; }
         .signout-btn:hover { color: #ffffff; border-color: rgba(255,136,136,0.5); background: rgba(255,136,136,0.08); }
@@ -3037,7 +3044,12 @@ export default function Dashboard() {
               <div className="user-chip-main">
                 <span className="user-chip-name">{authUser.fullName}</span>
                 {authUser.isAdmin && <span className="user-badge-admin">Admin</span>}
-                {!authUser.isAdmin && <span className="user-badge-viewer">Viewer</span>}
+                {!authUser.isAdmin && authUser.isPlatformAdmin && (
+                  <span className="user-badge-platform">Platform Admin</span>
+                )}
+                {!authUser.isAdmin && !authUser.isPlatformAdmin && (
+                  <span className="user-badge-viewer">Viewer</span>
+                )}
               </div>
               <div className="user-chip-email">{authUser.email}</div>
             </div>
@@ -3107,7 +3119,7 @@ export default function Dashboard() {
                   hiding it keeps viewers from seeing a control that would 403.
                   Replaces the old "access only to admin - Andrew" note, which was
                   documentation rather than an actual restriction. */}
-              {authUser?.isAdmin && (
+              {canManage && (
                 <div className="upload-files-wrap">
                   <button className="upload-files-btn" onClick={openUploadModal}>
                     Upload Files
@@ -3323,7 +3335,7 @@ export default function Dashboard() {
                                           : isIncluded(mfMonth, file.key) ? '✓ Included' : 'Include'}
                                       </button>
                                     )}
-                                    {authUser?.isAdmin && (
+                                    {canManage && (
                                       <button
                                         className="move-file-btn"
                                         onClick={(e) => { e.stopPropagation(); openMoveDialog(file); }}
@@ -4530,7 +4542,7 @@ export default function Dashboard() {
                       })()}
                     </select>
                     {/* Admin only; /api/billing/upload-sources requires it. */}
-                    {authUser?.isAdmin && (
+                    {canManage && (
                       <button
                         className="consultant-new-month-btn"
                         onClick={() => {
@@ -4554,7 +4566,7 @@ export default function Dashboard() {
                     </button>
                     {/* Only meaningful when an uploaded file is overriding the
                         generated report, and only actionable by an admin. */}
-                    {authUser?.isAdmin && billingReport?.approvedKey && (
+                    {canManage && billingReport?.approvedKey && (
                       <button
                         className="consultant-new-month-btn"
                         onClick={resetBillingToDefault}
@@ -4710,7 +4722,7 @@ export default function Dashboard() {
                                     >
                                       ✓ Approved
                                     </span>
-                                  ) : authUser?.isAdmin ? (
+                                  ) : canManage ? (
                                     /* Admins only. The server enforces this too
                                        (requireAdmin on /api/billing/approve);
                                        hiding the button is just so viewers are
