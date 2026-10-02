@@ -449,7 +449,7 @@ export default function Dashboard() {
     { key: 'all-info',   label: 'All Info' },
     { key: 'consultant', label: 'Consultant Report' },
     { key: 'billing',    label: 'Billing' },
-    { key: 'welfare',    label: 'Welfare', adminOnly: true },
+    { key: 'welfare',    label: 'Welfare' },
   ];
 
   // Set true when the deployed build no longer matches the one this tab loaded.
@@ -661,7 +661,7 @@ export default function Dashboard() {
   // Signed-in identity, from /api/auth/me. Null until the first fetch resolves.
   type AuthUser = {
     authenticated: boolean; email: string; firstName: string;
-    lastName: string; fullName: string; isAdmin: boolean;
+    lastName: string; fullName: string; isAdmin: boolean; isPlatformAdmin?: boolean;
   };
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   // Nothing renders until the session is confirmed, so a signed-out visitor
@@ -684,6 +684,100 @@ export default function Dashboard() {
     totals: Record<string, number>;
     unmapped: string[];
   };
+  // ===== Welfare access =====
+  // Welfare is admin-only unless an admin grants a time-boxed window.
+  type WelfareAccess = {
+    allowed: boolean;
+    reason: 'admin' | 'granted' | 'denied';
+    expiresAt?: string;
+    msRemaining?: number;
+    grantedBy?: string;
+  };
+  type GrantRow = {
+    email: string; grantedBy: string; grantedAt: string; expiresAt: string;
+    days: number; revokedAt?: string; revokedBy?: string;
+    active: boolean; msRemaining: number;
+  };
+  const [welfareAccess, setWelfareAccess] = useState<WelfareAccess | null>(null);
+  const [grants, setGrants] = useState<GrantRow[] | null>(null);
+  // Ticks every 30s so the countdown stays live without re-fetching.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [grantEmail, setGrantEmail] = useState('');
+  const [grantDays, setGrantDays] = useState(1);
+  const [grantBusy, setGrantBusy] = useState(false);
+  const [grantError, setGrantError] = useState<string | null>(null);
+
+  async function loadWelfareAccess() {
+    try {
+      const res = await fetch('/api/access-grants', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      setWelfareAccess(data.access || null);
+      setGrants(data.grants ?? null);
+    } catch {
+      // Offline or mid-deploy; the tab stays locked, which is the safe default.
+    }
+  }
+
+  async function submitGrant() {
+    if (!grantEmail || grantBusy) return;
+    setGrantBusy(true);
+    setGrantError(null);
+    try {
+      const res = await fetch('/api/access-grants', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: grantEmail.trim(), days: grantDays }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+      setGrantEmail('');
+      await loadWelfareAccess();
+    } catch (e: any) {
+      setGrantError(e.message || 'Could not grant access');
+    } finally {
+      setGrantBusy(false);
+    }
+  }
+
+  async function revokeGrant(email: string) {
+    setGrantBusy(true);
+    setGrantError(null);
+    try {
+      const res = await fetch(`/api/access-grants?email=${encodeURIComponent(email)}`,
+                              { method: 'DELETE' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+      await loadWelfareAccess();
+    } catch (e: any) {
+      setGrantError(e.message || 'Could not revoke access');
+    } finally {
+      setGrantBusy(false);
+    }
+  }
+
+  // "2d 4h", "3h 12m", "7m". Blank once it has run out.
+  function formatRemaining(ms: number): string {
+    if (!Number.isFinite(ms) || ms <= 0) return 'expired';
+    const mins = Math.floor(ms / 60000);
+    const d = Math.floor(mins / 1440);
+    const h = Math.floor((mins % 1440) / 60);
+    const m = mins % 60;
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  }
+
+  // Recomputed against nowTick so it counts down between fetches.
+  const welfareMsLeft = (() => {
+    if (!welfareAccess?.expiresAt) return 0;
+    return Date.parse(welfareAccess.expiresAt) - nowTick;
+  })();
+  const welfareUnlocked = Boolean(
+    welfareAccess?.allowed &&
+    (welfareAccess.reason === 'admin' || welfareMsLeft > 0)
+  );
+
   const [welfareMonth, setWelfareMonth] = useState<string>('');
   const [welfareData, setWelfareData] = useState<WelfareResp | null>(null);
   const [welfareLoading, setWelfareLoading] = useState(false);
@@ -932,6 +1026,15 @@ export default function Dashboard() {
     return () => { stopped = true; clearInterval(timer); window.removeEventListener('focus', onFocus); };
   }, []);
 
+  // Keeps the countdown moving, and re-checks the grant every 5 minutes so a
+  // revoke takes effect without a reload.
+  useEffect(() => {
+    const tick = setInterval(() => setNowTick(Date.now()), 30_000);
+    const recheck = setInterval(() => { loadWelfareAccess(); }, 300_000);
+    return () => { clearInterval(tick); clearInterval(recheck); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     setMounted(true);
     loadAllFilesData();
@@ -957,6 +1060,7 @@ export default function Dashboard() {
         if (d?.authenticated) {
           setAuthUser(d);
           setAuthChecked(true);
+          loadWelfareAccess();
           return;
         }
       }
@@ -2432,6 +2536,28 @@ export default function Dashboard() {
 
         .tabs-section { position: relative; z-index: 10; padding: 0 32px; max-width: 1800px; margin: 0 auto 24px; }
         .tabs-pill { display: inline-flex; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 999px; padding: 6px; gap: 4px; backdrop-filter: blur(20px); }
+        .rail-btn { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .rail-btn.locked { opacity: 0.45; cursor: not-allowed; }
+        .rail-btn.locked:hover { background: transparent; color: rgba(255,255,255,0.5); }
+        .rail-lock { font-size: 11px; opacity: 0.8; }
+        .rail-countdown { font-size: 10px; letter-spacing: 0.06em; color: #80d090; background: rgba(80,200,120,0.12); border-radius: 4px; padding: 2px 6px; white-space: nowrap; }
+        .welfare-locked { max-width: 560px; margin: 80px auto; text-align: center; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; padding: 44px 40px; }
+        .welfare-locked-icon { font-size: 40px; margin-bottom: 18px; opacity: 0.8; }
+        .welfare-locked h2 { font-family: 'Fraunces', serif; font-size: 24px; margin: 0 0 14px; color: #fff; }
+        .welfare-locked p { color: rgba(255,255,255,0.6); font-size: 14px; line-height: 1.7; margin: 0 0 14px; }
+        .welfare-locked-sub { font-size: 13px !important; color: rgba(255,255,255,0.45) !important; }
+        .welfare-grant-banner { display: flex; align-items: center; gap: 12px; padding: 12px 18px; margin-bottom: 18px; background: rgba(80,200,120,0.08); border: 1px solid rgba(80,200,120,0.35); border-radius: 10px; color: rgba(255,255,255,0.8); font-size: 13px; }
+        .welfare-grant-banner.ending { background: rgba(245,200,110,0.1); border-color: rgba(245,200,110,0.45); color: #f5c86e; }
+        .grant-panel { background: rgba(107,164,255,0.05); border: 1px solid rgba(107,164,255,0.22); border-radius: 12px; padding: 20px 24px; margin-bottom: 22px; }
+        .grant-panel-title { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(107,164,255,0.9); font-weight: 600; margin-bottom: 14px; }
+        .grant-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+        .grant-input { flex: 1; min-width: 240px; padding: 9px 14px; border-radius: 8px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.16); color: #fff; font-family: 'Inter', sans-serif; font-size: 13px; }
+        .grant-table td, .grant-table th { font-size: 12px; }
+        .grant-row-dim td { opacity: 0.45; }
+        .grant-active { color: #80d090; font-weight: 600; }
+        .grant-expired { color: rgba(255,255,255,0.4); }
+        .grant-revoked { color: #ff8888; }
+        .grant-empty { color: rgba(255,255,255,0.45); font-size: 13px; font-style: italic; }
         .welfare-notes { background: rgba(107,164,255,0.05); border: 1px solid rgba(107,164,255,0.2); border-radius: 10px; padding: 18px 22px; margin-bottom: 22px; }
         .welfare-notes-title { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(107,164,255,0.9); font-weight: 600; margin-bottom: 12px; }
         .welfare-notes ul { margin: 0; padding-left: 20px; }
@@ -2926,15 +3052,30 @@ export default function Dashboard() {
 
       {/* The only navigation. Replaces the old tab bar entirely. */}
       <nav className="section-rail">
-        {NAV_ITEMS.filter(n => !n.adminOnly || authUser?.isAdmin).map(n => (
-          <button
-            key={n.key}
-            className={`rail-btn ${activeTab === n.key ? 'active' : ''}`}
-            onClick={() => setActiveTab(n.key)}
-          >
-            {n.label}
-          </button>
-        ))}
+        {NAV_ITEMS.map(n => {
+          // Welfare stays visible to everyone but is locked until an admin
+          // grants access. Hiding it would leave people unable to ask for it.
+          const locked = n.key === 'welfare' && !welfareUnlocked;
+          const left = n.key === 'welfare' && welfareAccess?.reason === 'granted'
+            ? formatRemaining(welfareMsLeft) : '';
+          return (
+            <button
+              key={n.key}
+              className={`rail-btn ${activeTab === n.key ? 'active' : ''} ${locked ? 'locked' : ''}`}
+              onClick={() => { if (!locked) setActiveTab(n.key); }}
+              disabled={locked}
+              title={locked
+                ? 'Welfare is locked. An administrator must grant you access, for between 1 and 7 days.'
+                : left
+                  ? `Welfare access expires in ${left}`
+                  : n.label}
+            >
+              <span className="rail-btn-label">{n.label}</span>
+              {locked && <span className="rail-lock" aria-label="locked">&#128274;</span>}
+              {!locked && left && <span className="rail-countdown">{left}</span>}
+            </button>
+          );
+        })}
       </nav>
 
       <div className="with-rail">
@@ -4114,7 +4255,32 @@ export default function Dashboard() {
         )}
 
         {/* ==================== BILLING TAB ==================== */}
-        {authUser?.isAdmin && activeTab === 'welfare' && (
+        {activeTab === 'welfare' && !welfareUnlocked && (
+          <div className="tab-panel">
+            <div className="welfare-locked">
+              <div className="welfare-locked-icon">&#128274;</div>
+              <h2>Welfare is locked</h2>
+              <p>
+                This view holds the wire payment figures for NY Practice. It is
+                restricted to administrators, who can grant you access for
+                between 1 and 7 days.
+              </p>
+              <p className="welfare-locked-sub">
+                Ask an administrator to open a window for{' '}
+                <strong>{authUser?.email}</strong>. Your access will end
+                automatically when the window closes.
+              </p>
+              {welfareAccess?.expiresAt && welfareMsLeft <= 0 && (
+                <p className="welfare-locked-sub">
+                  Your previous access expired on{' '}
+                  {new Date(welfareAccess.expiresAt).toLocaleString()}.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'welfare' && welfareUnlocked && (
           <div className="tab-panel">
             <div className="consultant-header">
               <div>
@@ -4138,6 +4304,98 @@ export default function Dashboard() {
                 </button>
               </div>
             </div>
+
+            {/* A granted user sees exactly how long they have left, both here
+                and in the rail, so the window never closes as a surprise. */}
+            {welfareAccess?.reason === 'granted' && (
+              <div className={`welfare-grant-banner ${welfareMsLeft < 3600_000 ? 'ending' : ''}`}>
+                <span>&#128274;</span>
+                <span>
+                  Temporary access granted by <strong>{welfareAccess.grantedBy}</strong>.
+                  Expires in <strong>{formatRemaining(welfareMsLeft)}</strong>
+                  {' '}({new Date(welfareAccess.expiresAt!).toLocaleString()}).
+                </span>
+              </div>
+            )}
+
+            {/* Admin-only: who can see this tab, and for how long. */}
+            {authUser?.isAdmin && (
+              <div className="grant-panel">
+                <div className="grant-panel-title">Who can access Welfare</div>
+                <div className="grant-form">
+                  <input
+                    className="grant-input"
+                    type="email"
+                    placeholder="name@gigworkersuniverse.com"
+                    value={grantEmail}
+                    onChange={(e) => setGrantEmail(e.target.value)}
+                    disabled={grantBusy}
+                  />
+                  <select
+                    className="consultant-month-select"
+                    value={grantDays}
+                    onChange={(e) => setGrantDays(Number(e.target.value))}
+                    disabled={grantBusy}
+                  >
+                    {[1, 2, 3, 4, 5, 6, 7].map(d => (
+                      <option key={d} value={d}>{d} day{d > 1 ? 's' : ''}</option>
+                    ))}
+                  </select>
+                  <button
+                    className="consultant-primary-btn"
+                    onClick={submitGrant}
+                    disabled={grantBusy || !grantEmail.trim()}
+                  >
+                    {grantBusy ? 'Saving...' : 'Grant access'}
+                  </button>
+                </div>
+                {grantError && <div className="consultant-error">{grantError}</div>}
+
+                {grants && grants.length > 0 ? (
+                  <table className="master-table grant-table">
+                    <thead>
+                      <tr>
+                        <th>User</th><th>Granted by</th><th>Days</th>
+                        <th>Expires</th><th>Status</th><th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {grants.map((g, i) => (
+                        <tr key={`${g.email}-${g.grantedAt}-${i}`}
+                            className={g.active ? '' : 'grant-row-dim'}>
+                          <td>{g.email}</td>
+                          <td>{g.grantedBy}</td>
+                          <td>{g.days}</td>
+                          <td>{new Date(g.expiresAt).toLocaleString()}</td>
+                          <td>
+                            {g.revokedAt
+                              ? <span className="grant-revoked">Revoked</span>
+                              : g.active
+                                ? <span className="grant-active">
+                                    {formatRemaining(Date.parse(g.expiresAt) - nowTick)} left
+                                  </span>
+                                : <span className="grant-expired">Expired</span>}
+                          </td>
+                          <td>
+                            {g.active && (
+                              <button className="move-file-btn"
+                                      onClick={() => revokeGrant(g.email)}
+                                      disabled={grantBusy}>
+                                Revoke
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div className="grant-empty">
+                    Nobody has been granted access. Only administrators can see this tab.
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Calculation notes. Kept above the table so the figures are never
                 read without the rules that produced them. */}

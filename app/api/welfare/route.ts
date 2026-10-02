@@ -19,7 +19,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import * as XLSX from 'xlsx';
-import { requireAdmin } from '@/lib/auth';
+import { requireWelfareAccess } from '@/lib/auth';
 
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
@@ -303,7 +303,7 @@ async function parseFile(key: string, groupFilter?: string, excludeGroup?: strin
 }
 
 export async function GET(req: NextRequest) {
-  const gate = await requireAdmin(req);
+  const gate = await requireWelfareAccess(req);
   if (gate instanceof NextResponse) return gate;
 
   const month = req.nextUrl.searchParams.get('month') || '';

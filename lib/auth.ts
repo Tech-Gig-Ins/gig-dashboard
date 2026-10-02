@@ -52,6 +52,14 @@ const ALLOWED_DOMAIN = (process.env.ALLOWED_EMAIL_DOMAIN || '')
   .trim().toLowerCase().replace(/^@/, '');
 
 // Comma-separated. Compared case-insensitively against the verified email claim.
+// Platform admins hold every technical permission - uploads, Move, Generate,
+// Include toggles, billing approval - but NOT the Welfare tab. Welfare is
+// authoritative rather than technical, so it needs an admin's time-boxed grant.
+const PLATFORM_ADMIN_EMAILS = (process.env.PLATFORM_ADMIN_EMAILS || '')
+  .split(',')
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
   .split(',')
   .map(s => s.trim().toLowerCase())
@@ -63,6 +71,8 @@ export type Session = {
   lastName: string;
   fullName: string;
   isAdmin: boolean;
+  /** Full technical access, but Welfare still needs a grant. */
+  isPlatformAdmin: boolean;
   sub: string;
 };
 
@@ -127,6 +137,7 @@ export async function getSession(req: AnyRequest): Promise<Session | null> {
       lastName,
       fullName: [firstName, lastName].filter(Boolean).join(' ') || email,
       isAdmin: ADMIN_EMAILS.includes(email),
+      isPlatformAdmin: PLATFORM_ADMIN_EMAILS.includes(email),
       sub: String(payload.sub || ''),
     };
   } catch (err: any) {
@@ -171,7 +182,9 @@ export async function requireAdmin(
       { status: 401 }
     );
   }
-  if (!session.isAdmin) {
+  // Platform admins count as admins for technical actions. Welfare is the one
+  // exception and uses requireWelfareAccess() instead.
+  if (!session.isAdmin && !session.isPlatformAdmin) {
     console.warn(`[auth] ${session.email} attempted an admin action`);
     return NextResponse.json(
       { error: 'Administrator access required', code: 'FORBIDDEN' },
@@ -190,4 +203,108 @@ export function sessionCookieOptions(maxAgeSeconds: number) {
     path: '/',
     maxAge: maxAgeSeconds,
   };
+}
+
+
+// =====================================================================
+// WELFARE ACCESS GRANTS
+// =====================================================================
+//
+// Welfare is admin-only by default. An admin can grant another signed-in user
+// access for 1 to 7 days. Grants live in S3 at access-grants/welfare.json and
+// are checked on every request, so expiry needs no scheduled job.
+//
+// Expired grants are KEPT, not deleted, so the file doubles as an audit trail.
+
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+
+export type WelfareGrant = {
+  email: string;
+  grantedBy: string;
+  grantedAt: string;
+  expiresAt: string;
+  days: number;
+  revokedAt?: string;
+  revokedBy?: string;
+};
+
+export const GRANTS_KEY = 'access-grants/welfare.json';
+
+const grantsS3 = new S3Client({
+  region: process.env.MY_AWS_REGION || 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY!,
+  },
+});
+
+export async function readGrants(): Promise<WelfareGrant[]> {
+  const bucket = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
+  try {
+    const obj = await grantsS3.send(new GetObjectCommand({ Bucket: bucket, Key: GRANTS_KEY }));
+    const chunks: Buffer[] = [];
+    for await (const c of obj.Body as any) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return Array.isArray(parsed.grants) ? parsed.grants : [];
+  } catch {
+    // No grants file yet. Nobody has been granted anything, which is the
+    // correct starting state.
+    return [];
+  }
+}
+
+/** The live grant for an email, or null. Revoked and expired ones are ignored. */
+export function activeGrantFor(grants: WelfareGrant[], email: string): WelfareGrant | null {
+  const now = Date.now();
+  const mine = grants.filter(g =>
+    String(g.email || '').toLowerCase() === email.toLowerCase() &&
+    !g.revokedAt &&
+    Date.parse(g.expiresAt) > now
+  );
+  if (mine.length === 0) return null;
+  // If several overlap, the one lasting longest wins.
+  return mine.sort((a, b) => Date.parse(b.expiresAt) - Date.parse(a.expiresAt))[0];
+}
+
+export type WelfareAccess = {
+  allowed: boolean;
+  reason: 'admin' | 'granted' | 'denied';
+  expiresAt?: string;
+  msRemaining?: number;
+  grantedBy?: string;
+};
+
+export async function checkWelfareAccess(session: Session): Promise<WelfareAccess> {
+  if (session.isAdmin) return { allowed: true, reason: 'admin' };
+  const grant = activeGrantFor(await readGrants(), session.email);
+  if (!grant) return { allowed: false, reason: 'denied' };
+  return {
+    allowed: true,
+    reason: 'granted',
+    expiresAt: grant.expiresAt,
+    msRemaining: Date.parse(grant.expiresAt) - Date.now(),
+    grantedBy: grant.grantedBy,
+  };
+}
+
+/** Gate for Welfare routes. Returns the session or a response to return. */
+export async function requireWelfareAccess(
+  req: AnyRequest
+): Promise<Session | NextResponse> {
+  const session = await getSession(req);
+  if (!session) {
+    return NextResponse.json(
+      { error: 'Not authenticated', code: 'UNAUTHENTICATED' }, { status: 401 }
+    );
+  }
+  const access = await checkWelfareAccess(session);
+  if (!access.allowed) {
+    console.warn(`[auth] ${session.email} attempted Welfare without a grant`);
+    return NextResponse.json({
+      error: 'Welfare access requires an administrator grant.',
+      code: 'WELFARE_LOCKED',
+    }, { status: 403 });
+  }
+  console.log(`[welfare] ${session.email} access via ${access.reason}`);
+  return session;
 }
