@@ -47,22 +47,76 @@ type RowSpec = {
   label: string;
   remittance: string | null;
   credits: string | null;
-  rate: number;
   groupFilter?: string;
+  // Rows of the file to LEAVE OUT. Decisely GIG 1 is the Corechoice T3 file
+  // minus the Hartford members, because Hartford is its own row at its own
+  // rate; counting them in both would bill the same people twice.
+  excludeGroup?: string;
+  // Present only on rows that did not exist before October 2026.
+  since?: string;
 };
 
+// Fee rates per row, as [cap fee rate, credit fee rate].
+//
+// They changed with the October 2026 template, so the figures are keyed by
+// month: anything before 2026-10 keeps the old rates and historical wires stay
+// reproducible. EP6 and PIOPAC are the reason the two rates are separate -
+// their cap fee and credit fee rates now differ.
+type RatePair = [number, number];
+
+const RATES_FROM_OCT_2026: Record<string, RatePair> = {
+  'Cassena': [83, 83],
+  'Tpa.com': [131, 131],
+  'GIG Credit Cards': [120, 120],
+  'Hartford': [54, 54],
+  'GWU3': [131, 131],
+  'BDSB': [131, 131],
+  'Northstead': [142, 142],
+  'Refresh': [142, 142],
+  'EP6': [142, 122],
+  'PIOPAC': [127, 112],
+  'Decisely GIG 1': [52, 52],
+  'Decisely GIG 2': [118, 118],
+};
+
+const RATES_BEFORE_OCT_2026: Record<string, RatePair> = {
+  'Cassena': [94, 94],
+  'Tpa.com': [131, 131],
+  'GIG Credit Cards': [120, 120],
+  'Hartford': [54, 54],
+  'GWU3': [131, 131],
+  'BDSB': [131, 131],
+  'Northstead': [142, 142],
+  'Refresh': [142, 142],
+  'EP6': [142, 142],
+  'PIOPAC': [142, 142],
+};
+
+const RATE_CHANGE_MONTH = '2026-10';
+
+/** Rates in force for a month, e.g. "2026-10". */
+function ratesFor(monthPrefix: string): Record<string, RatePair> {
+  return monthPrefix >= RATE_CHANGE_MONTH ? RATES_FROM_OCT_2026 : RATES_BEFORE_OCT_2026;
+}
+
 const ROWS: RowSpec[] = [
-  { label: 'Cassena',          remittance: 'Cassena Remittance',    credits: 'Cassena Credits',    rate: 94 },
-  { label: 'Tpa.com',          remittance: 'Gig Remittance',        credits: 'Gig Credits',        rate: 131 },
-  { label: 'GIG Credit Cards', remittance: null,                    credits: null,                 rate: 120 },
-  { label: 'Hartford',         remittance: 'Corechoice T3',         credits: null,                 rate: 54,
+  { label: 'Cassena',          remittance: 'Cassena Remittance',    credits: 'Cassena Credits' },
+  { label: 'Tpa.com',          remittance: 'Gig Remittance',        credits: 'Gig Credits' },
+  { label: 'GIG Credit Cards', remittance: null,                    credits: null },
+  { label: 'Hartford',         remittance: 'Corechoice T3',         credits: null,
     groupFilter: 'HARTFORD FUNDING, LTD.' },
-  { label: 'GWU3',             remittance: 'GWU3 Remittance',       credits: 'GWU3 Credits',       rate: 131 },
-  { label: 'BDSB',             remittance: 'BDSB Remittance',       credits: 'BDSB Credits',       rate: 131 },
-  { label: 'Northstead',       remittance: 'Northstead Remittance', credits: 'Northstead Credits', rate: 142 },
-  { label: 'Refresh',          remittance: 'Refresh',               credits: null,                 rate: 142 },
-  { label: 'EP6',              remittance: 'EP6 Remittance',        credits: null,                 rate: 142 },
-  { label: 'PIOPAC',           remittance: 'Enroll Confidently or PIOPAC', credits: null,           rate: 142 },
+  { label: 'GWU3',             remittance: 'GWU3 Remittance',       credits: 'GWU3 Credits' },
+  { label: 'BDSB',             remittance: 'BDSB Remittance',       credits: 'BDSB Credits' },
+  { label: 'Northstead',       remittance: 'Northstead Remittance', credits: 'Northstead Credits' },
+  { label: 'Refresh',          remittance: 'Refresh',               credits: null },
+  { label: 'EP6',              remittance: 'EP6 Remittance',        credits: null },
+  { label: 'PIOPAC',           remittance: 'Enroll Confidently or PIOPAC', credits: null },
+  // New in the October 2026 template. GIG 1 is Corechoice T3 excluding the
+  // Hartford members, which are billed separately on the Hartford row above.
+  { label: 'Decisely GIG 1',   remittance: 'Corechoice T3',         credits: null,
+    excludeGroup: 'HARTFORD FUNDING, LTD.', since: RATE_CHANGE_MONTH },
+  { label: 'Decisely GIG 2',   remittance: 'Corechoice T1',         credits: null,
+    since: RATE_CHANGE_MONTH },
 ];
 
 // ---------- shared helpers (mirrors app/api/master/route.ts) ----------------
@@ -176,7 +230,7 @@ type Parsed = { rowCount: number; distinct: number; amount: number; amountColumn
 //            plans genuinely pays twice
 //   distinct unique people, via the master dashboard's identityKey
 //   rowCount raw data rows, which is what credit files use
-async function parseFile(key: string, groupFilter?: string): Promise<Parsed> {
+async function parseFile(key: string, groupFilter?: string, excludeGroup?: string): Promise<Parsed> {
   const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
   const buf = await toBuffer(obj.Body as any);
 
@@ -231,6 +285,9 @@ async function parseFile(key: string, groupFilter?: string): Promise<Parsed> {
 
     // Hartford is a slice of the Corechoice T3 file, not a file of its own.
     if (groupFilter && normName(group) !== normName(groupFilter)) continue;
+    // Used by Decisely GIG 1 to leave out the Hartford members, who are
+    // billed on their own row at their own rate.
+    if (excludeGroup && normName(group) === normName(excludeGroup)) continue;
 
     rowCount++;
     amount += toNumber(cell(r, amtIdx));
@@ -345,12 +402,19 @@ export async function GET(req: NextRequest) {
       if (!credByLabel.has(label)) credByLabel.set(label, key);
     }
 
+    const rateTable = ratesFor(prefix);
+
     const out = [];
     for (const spec of ROWS) {
+      // Rows introduced with a later template do not exist for earlier months.
+      if (spec.since && prefix < spec.since) continue;
+
+      const [capRate, creditRate] = rateTable[spec.label] ?? [0, 0];
+
       // Rows with no associated file render blank, as requested.
       if (!spec.remittance) {
         out.push({
-          label: spec.label, rate: spec.rate, mapped: false,
+          label: spec.label, capRate, creditRate, mapped: false,
           remittanceFile: null, creditFile: null,
           amount: null, enrolled: null, capFee: null,
           creditAmount: null, creditCount: null, creditFees: null, nypWire: null,
@@ -361,13 +425,13 @@ export async function GET(req: NextRequest) {
       const remKey = remByLabel.get(spec.remittance) || null;
       const credKey = spec.credits ? (credByLabel.get(spec.credits) || null) : null;
 
-      const rem = remKey ? await parseFile(remKey, spec.groupFilter) : null;
+      const rem = remKey ? await parseFile(remKey, spec.groupFilter, spec.excludeGroup) : null;
       // Credits are counted raw: no dedup, per the operator's instruction.
       const cred = credKey ? await parseFile(credKey) : null;
 
       const amount = rem?.amount ?? 0;
       const enrolled = rem?.distinct ?? 0;
-      const capFee = enrolled * spec.rate;
+      const capFee = enrolled * capRate;
       // Credits files store their values as NEGATIVES. The template's formula
       // (=C-E-F+H) expects F to be a positive magnitude, so a negative F would
       // ADD the credit to the wire instead of subtracting it. Take the
@@ -375,11 +439,12 @@ export async function GET(req: NextRequest) {
       const creditAmountRaw = cred?.amount ?? 0;
       const creditAmount = Math.abs(creditAmountRaw);
       const creditCount = cred?.rowCount ?? 0;
-      const creditFees = creditCount * spec.rate;
+      const creditFees = creditCount * creditRate;
 
       out.push({
         label: spec.label,
-        rate: spec.rate,
+        capRate,
+        creditRate,
         mapped: true,
         remittanceFile: remKey ? remKey.split('/').pop() : null,
         ambiguous: (remCandidates.get(spec.remittance!) || []).length > 1
@@ -419,7 +484,9 @@ export async function GET(req: NextRequest) {
 
     const noManifest = includedKeys.size === 0;
 
-    return NextResponse.json({ month, monthPrefix: prefix, creditMonth: prevLabel, rows: out, totals, unmapped, noManifest });
+    return NextResponse.json({ month, monthPrefix: prefix, creditMonth: prevLabel,
+      rateSet: prefix >= RATE_CHANGE_MONTH ? 'current' : 'legacy', rateChangeMonth: RATE_CHANGE_MONTH,
+      rows: out, totals, unmapped, noManifest });
   } catch (err: any) {
     console.error('[welfare] error:', err);
     return NextResponse.json({ error: err.message || 'Failed to build the welfare table' }, { status: 500 });

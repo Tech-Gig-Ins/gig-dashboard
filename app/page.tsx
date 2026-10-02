@@ -670,7 +670,7 @@ export default function Dashboard() {
 
   // ===== Welfare (NYP wire) tab =====
   type WelfareRow = {
-    label: string; rate: number; mapped: boolean;
+    label: string; capRate: number; creditRate: number; mapped: boolean;
     remittanceFile: string | null; creditFile: string | null;
     amountColumn?: string | null; rawRows?: number;
     amount: number | null; enrolled: number | null; capFee: number | null;
@@ -679,6 +679,7 @@ export default function Dashboard() {
   };
   type WelfareResp = {
     month: string; monthPrefix: string; creditMonth?: string;
+    rateSet?: 'current' | 'legacy'; rateChangeMonth?: string;
     rows: WelfareRow[];
     totals: Record<string, number>;
     unmapped: string[];
@@ -4153,8 +4154,12 @@ export default function Dashboard() {
                 <li><strong>Credit Amount</strong> sums the amount column of the matching credits file, taken as a <strong>positive magnitude</strong>. Credits files store their values as negatives, and the formula already subtracts them, so a negative here would add to the wire instead of reducing it. <strong>Credit Count</strong> is a <strong>raw row count</strong> with no de-duplication. Rows with no credits file show zero.</li>
                 <li><strong>Credit Fees</strong> = Credit Count &times; fee rate.</li>
                 <li><strong>NYP Wire</strong> = Remittance Amount &minus; GIG Cap Fee &minus; Credit Amount + Credit Fees.</li>
-                <li><strong>Fee rates</strong> per source: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131, BDSB 131, Northstead 142, Refresh 142, EP6 142, PIOPAC 142.</li>
+                <li><strong>Fee rates.</strong> These changed with the October 2026 template. The set in force for the selected month is marked <em>(applied)</em>.
+                  <br /><strong>From October 2026{welfareData?.rateSet === 'current' ? ' (applied)' : ''}:</strong> Cassena 83, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131, BDSB 131, Northstead 142, Refresh 142, EP6 142 / 122, PIOPAC 127 / 112, Decisely GIG 1 52, Decisely GIG 2 118.
+                  <br /><strong>Before October 2026{welfareData?.rateSet === 'legacy' ? ' (applied)' : ''}:</strong> Cassena 94, EP6 142, PIOPAC 142, and no Decisely rows. All other rates were the same.
+                  <br /><span style={{ color: 'rgba(255,255,255,0.45)' }}>Where two numbers are shown they are cap fee / credit fee: those rows use a different rate for each column. A single number is used for both.</span></li>
                 <li><strong>Hartford</strong> is not a separate file. It is the subset of rows in the Corechoice T3 remittance whose Group is HARTFORD FUNDING, LTD.</li>
+                <li><strong>Decisely GIG 1</strong> is the rest of the Corechoice T3 file, with the Hartford rows left out so those members are not billed twice. <strong>Decisely GIG 2</strong> is the Corechoice T1 file. Both appear from October 2026 onward.</li>
                 <li><strong>GIG Credit Cards</strong> has no associated file, so its figures are left blank rather than shown as zero.</li>
                 <li><strong>Unused files.</strong> Any eligible file for this month that maps to no row is listed in a warning above the table, so nothing is dropped silently.</li>
                 <li>Figures start from <strong>June 2026</strong>; earlier months have no file set.</li>
