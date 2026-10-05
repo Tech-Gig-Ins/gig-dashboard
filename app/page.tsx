@@ -679,6 +679,24 @@ export default function Dashboard() {
   // Lets one person see the dashboard as any role without a second login.
   // Deliberately NOT a security control: impersonating an admin confers that
   // admin's powers. The banner exists so the current identity is never in doubt.
+  // Registered dashboard users, for both pickers. Sourced from Cognito, so it
+  // is whoever has actually signed in.
+  type DirUser = { email: string; name: string; role: string; enabled: boolean };
+  const [dirUsers, setDirUsers] = useState<DirUser[] | null>(null);
+  const [dirError, setDirError] = useState<string | null>(null);
+
+  async function loadUsers() {
+    try {
+      const res = await fetch('/api/users', { cache: 'no-store' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { setDirError(body.error || 'Could not load users'); return; }
+      setDirUsers(body.users || []);
+      setDirError(null);
+    } catch {
+      setDirError('Could not load users');
+    }
+  }
+
   const [impOpen, setImpOpen] = useState(false);
   const [impEmail, setImpEmail] = useState('');
   const [impBusy, setImpBusy] = useState(false);
@@ -1107,6 +1125,7 @@ export default function Dashboard() {
           setAuthUser(d);
           setAuthChecked(true);
           loadWelfareAccess();
+          if (d.isAdmin || d.isPlatformAdmin) loadUsers();
           return;
         }
       }
@@ -2608,6 +2627,7 @@ export default function Dashboard() {
         .grant-panel { background: rgba(107,164,255,0.05); border: 1px solid rgba(107,164,255,0.22); border-radius: 12px; padding: 20px 24px; margin-bottom: 22px; }
         .grant-panel-title { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(107,164,255,0.9); font-weight: 600; margin-bottom: 14px; }
         .grant-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+        .grant-select { flex: 1; min-width: 320px; }
         .grant-input { flex: 1; min-width: 240px; padding: 9px 14px; border-radius: 8px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.16); color: #fff; font-family: 'Inter', sans-serif; font-size: 13px; }
         .grant-table td, .grant-table th { font-size: 12px; }
         .grant-row-dim td { opacity: 0.45; }
@@ -3117,7 +3137,7 @@ export default function Dashboard() {
               <div className="user-chip-email">{authUser.email}</div>
             </div>
           )}
-          {canManage && !authUser?.isImpersonating && (
+          {authUser?.isPlatformAdmin && !authUser?.isImpersonating && (
             <div className="imp-wrap">
               <button className="signout-btn" onClick={() => setImpOpen(o => !o)}
                       title="View the dashboard as another account">
@@ -3126,16 +3146,25 @@ export default function Dashboard() {
               {impOpen && (
                 <div className="imp-pop">
                   <div className="imp-pop-title">View as another account</div>
-                  <input
-                    className="grant-input"
-                    type="email"
-                    placeholder="name@gigworkersuniverse.com"
+                  <select
+                    className="consultant-month-select"
                     value={impEmail}
                     onChange={(e) => setImpEmail(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') startImpersonation(); }}
-                    disabled={impBusy}
-                    autoFocus
-                  />
+                    disabled={impBusy || !dirUsers}
+                    style={{ width: '100%' }}
+                  >
+                    <option value="">
+                      {dirUsers ? 'Select an account...' : 'Loading accounts...'}
+                    </option>
+                    {(dirUsers || [])
+                      .filter(u => u.email !== authUser?.email)
+                      .map(u => (
+                        <option key={u.email} value={u.email}>
+                          {u.name} — {u.role}
+                        </option>
+                      ))}
+                  </select>
+                  {dirError && <div className="imp-pop-error">{dirError}</div>}
                   {impError && <div className="imp-pop-error">{impError}</div>}
                   <div className="imp-pop-actions">
                     <button className="close-btn" onClick={() => setImpOpen(false)}>Cancel</button>
@@ -4433,14 +4462,23 @@ export default function Dashboard() {
               <div className="grant-panel">
                 <div className="grant-panel-title">Who can access Welfare</div>
                 <div className="grant-form">
-                  <input
-                    className="grant-input"
-                    type="email"
-                    placeholder="name@gigworkersuniverse.com"
+                  <select
+                    className="consultant-month-select grant-select"
                     value={grantEmail}
                     onChange={(e) => setGrantEmail(e.target.value)}
-                    disabled={grantBusy}
-                  />
+                    disabled={grantBusy || !dirUsers}
+                  >
+                    <option value="">
+                      {dirUsers ? 'Select a user...' : 'Loading users...'}
+                    </option>
+                    {(dirUsers || [])
+                      .filter(u => u.email !== authUser?.email)
+                      .map(u => (
+                        <option key={u.email} value={u.email}>
+                          {u.name} ({u.email}) — {u.role}
+                        </option>
+                      ))}
+                  </select>
                   <select
                     className="consultant-month-select"
                     value={grantDays}
@@ -4459,6 +4497,7 @@ export default function Dashboard() {
                     {grantBusy ? 'Saving...' : 'Grant access'}
                   </button>
                 </div>
+                {dirError && <div className="consultant-error">{dirError}</div>}
                 {grantError && <div className="consultant-error">{grantError}</div>}
 
                 {grants && grants.length > 0 ? (

@@ -28,15 +28,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  // Judge on the REAL identity: an impersonated session must not be able to
-  // hop onwards to a third account.
-  const realIsPrivileged = session.isImpersonating
-    ? false
-    : (session.isAdmin || session.isPlatformAdmin);
+  // Platform admins only. Admins do not get this: it is a technical testing
+  // aid, and an admin using it would blur who actually approved something.
+  // Judged on the REAL identity, so an impersonated session cannot hop onwards
+  // to a third account.
+  const realIsPlatformAdmin = session.isImpersonating ? false : session.isPlatformAdmin;
 
-  if (!realIsPrivileged) {
+  if (!realIsPlatformAdmin) {
     return NextResponse.json(
-      { error: 'Only an administrator or platform administrator can impersonate.' },
+      { error: 'Only a platform administrator can view the dashboard as another account.' },
       { status: 403 }
     );
   }
