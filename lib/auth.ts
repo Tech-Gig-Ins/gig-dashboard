@@ -45,6 +45,7 @@ function readCookie(req: AnyRequest, name: string): string | undefined {
 export const ID_COOKIE = 'gwu_id';
 export const ACCESS_COOKIE = 'gwu_at';
 export const REFRESH_COOKIE = 'gwu_rt';
+export const IMPERSONATE_COOKIE = 'gwu_imp';
 
 const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID!;
 const CLIENT_ID = process.env.COGNITO_CLIENT_ID!;
@@ -74,6 +75,9 @@ export type Session = {
   /** Full technical access, but Welfare still needs a grant. */
   isPlatformAdmin: boolean;
   sub: string;
+  /** Set while impersonating. The signed-in account doing the impersonating. */
+  actualEmail?: string;
+  isImpersonating?: boolean;
 };
 
 // Created once per process. The library caches the JWKS internally, so this
@@ -131,7 +135,7 @@ export async function getSession(req: AnyRequest): Promise<Session | null> {
     const firstName = String(payload.given_name || '').trim();
     const lastName = String(payload.family_name || '').trim();
 
-    return {
+    const real: Session = {
       email,
       firstName,
       lastName,
@@ -140,6 +144,36 @@ export async function getSession(req: AnyRequest): Promise<Session | null> {
       isPlatformAdmin: PLATFORM_ADMIN_EMAILS.includes(email),
       sub: String(payload.sub || ''),
     };
+
+    // ---- Impersonation (testing aid) --------------------------------------
+    //
+    // A platform admin or admin can act as another account so roles can be
+    // checked without juggling logins. The cookie is set only by
+    // /api/impersonate, which verifies the real session first.
+    //
+    // This is NOT a security boundary: anyone who can impersonate an admin can
+    // do anything that admin can, including granting themselves Welfare. It
+    // exists so one person can test every role. Every mutating route logs both
+    // identities so the trail still shows who really acted.
+    const impersonating = readCookie(req, IMPERSONATE_COOKIE);
+    if (impersonating && (real.isAdmin || real.isPlatformAdmin)) {
+      const target = impersonating.trim().toLowerCase();
+      if (target && target !== real.email && emailDomain(target) === ALLOWED_DOMAIN) {
+        return {
+          email: target,
+          firstName: target.split('@')[0],
+          lastName: '',
+          fullName: target,
+          isAdmin: ADMIN_EMAILS.includes(target),
+          isPlatformAdmin: PLATFORM_ADMIN_EMAILS.includes(target),
+          sub: real.sub,
+          actualEmail: real.email,
+          isImpersonating: true,
+        };
+      }
+    }
+
+    return real;
   } catch (err: any) {
     // Expired or tampered token. Expiry is the common case and is not an error
     // worth logging loudly.

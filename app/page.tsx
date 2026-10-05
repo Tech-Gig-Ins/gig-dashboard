@@ -662,6 +662,7 @@ export default function Dashboard() {
   type AuthUser = {
     authenticated: boolean; email: string; firstName: string;
     lastName: string; fullName: string; isAdmin: boolean; isPlatformAdmin?: boolean;
+    isImpersonating?: boolean; actualEmail?: string;
   };
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   // Nothing renders until the session is confirmed, so a signed-out visitor
@@ -673,6 +674,45 @@ export default function Dashboard() {
   // The Welfare GRANT panel deliberately stays strictly isAdmin, or a platform
   // admin could grant themselves the access this separation exists to withhold.
   const canManage = Boolean(authUser?.isAdmin || authUser?.isPlatformAdmin);
+
+  // ===== Impersonation (testing aid) =====
+  // Lets one person see the dashboard as any role without a second login.
+  // Deliberately NOT a security control: impersonating an admin confers that
+  // admin's powers. The banner exists so the current identity is never in doubt.
+  const [impOpen, setImpOpen] = useState(false);
+  const [impEmail, setImpEmail] = useState('');
+  const [impBusy, setImpBusy] = useState(false);
+  const [impError, setImpError] = useState<string | null>(null);
+
+  async function startImpersonation() {
+    if (!impEmail.trim() || impBusy) return;
+    setImpBusy(true);
+    setImpError(null);
+    try {
+      const res = await fetch('/api/impersonate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: impEmail.trim() }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+      // Full reload: every tab's data was fetched as the previous identity.
+      window.location.reload();
+    } catch (e: any) {
+      setImpError(e.message || 'Could not switch account');
+      setImpBusy(false);
+    }
+  }
+
+  async function stopImpersonation() {
+    setImpBusy(true);
+    try {
+      await fetch('/api/impersonate', { method: 'DELETE' });
+      window.location.reload();
+    } catch {
+      setImpBusy(false);
+    }
+  }
 
   // ===== Welfare (NYP wire) tab =====
   type WelfareRow = {
@@ -2524,6 +2564,16 @@ export default function Dashboard() {
         .user-chip-name { font-size: 13px; letter-spacing: 0.04em; text-transform: none; color: #ffffff; font-weight: 500; }
         .user-chip-email { font-size: 11px; letter-spacing: 0.02em; text-transform: none; color: rgba(255,255,255,0.4); }
         .user-badge-admin { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: #80d090; background: rgba(80,200,120,0.12); border: 1px solid rgba(80,200,120,0.4); padding: 2px 7px; border-radius: 3px; }
+        .imp-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 60; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 9px 20px; background: #c9a3ff; color: #1a0b33; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; }
+        .imp-banner-dot { width: 8px; height: 8px; border-radius: 50%; background: #1a0b33; animation: pulse 2s ease-in-out infinite; }
+        .imp-exit-btn { padding: 4px 14px; border-radius: 6px; background: #1a0b33; border: none; color: #fff; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; cursor: pointer; }
+        .imp-exit-btn:hover { background: #000; }
+        .imp-wrap { position: relative; }
+        .imp-pop { position: absolute; right: 0; top: calc(100% + 10px); width: 320px; background: #0a1e42; border: 1px solid rgba(201,163,255,0.4); border-radius: 12px; padding: 18px; z-index: 70; box-shadow: 0 12px 40px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 12px; }
+        .imp-pop-title { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: #c9a3ff; font-weight: 600; }
+        .imp-pop-actions { display: flex; justify-content: flex-end; gap: 10px; }
+        .imp-pop-error { color: #ff8888; font-size: 12px; }
+        .imp-pop-note { font-size: 11px; color: rgba(255,255,255,0.4); line-height: 1.6; text-transform: none; letter-spacing: 0; }
         .user-badge-platform { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: #c9a3ff; background: rgba(201,163,255,0.12); border: 1px solid rgba(201,163,255,0.4); padding: 2px 7px; border-radius: 3px; }
         .user-badge-viewer { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: rgba(107,164,255,0.9); background: rgba(107,164,255,0.1); border: 1px solid rgba(107,164,255,0.35); padding: 2px 7px; border-radius: 3px; }
         .signout-btn { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.55); border: 1px solid rgba(255,255,255,0.16); border-radius: 6px; padding: 6px 14px; text-decoration: none; transition: all 0.15s ease; white-space: nowrap; }
@@ -3007,6 +3057,19 @@ export default function Dashboard() {
       <div className="grain" />
 
 
+      {authUser?.isImpersonating && (
+        <div className="imp-banner">
+          <span className="imp-banner-dot" />
+          <span>
+            Acting as <strong>{authUser.email}</strong>
+            {' '}&middot; signed in as <strong>{authUser.actualEmail}</strong>
+          </span>
+          <button className="imp-exit-btn" onClick={stopImpersonation} disabled={impBusy}>
+            {impBusy ? 'Exiting...' : 'Exit'}
+          </button>
+        </div>
+      )}
+
       <header className="header">
         <div className="brand">
           {/* Replace /public/logo.png with your image (square, 128x128 or larger).
@@ -3052,6 +3115,41 @@ export default function Dashboard() {
                 )}
               </div>
               <div className="user-chip-email">{authUser.email}</div>
+            </div>
+          )}
+          {canManage && !authUser?.isImpersonating && (
+            <div className="imp-wrap">
+              <button className="signout-btn" onClick={() => setImpOpen(o => !o)}
+                      title="View the dashboard as another account">
+                View as
+              </button>
+              {impOpen && (
+                <div className="imp-pop">
+                  <div className="imp-pop-title">View as another account</div>
+                  <input
+                    className="grant-input"
+                    type="email"
+                    placeholder="name@gigworkersuniverse.com"
+                    value={impEmail}
+                    onChange={(e) => setImpEmail(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') startImpersonation(); }}
+                    disabled={impBusy}
+                    autoFocus
+                  />
+                  {impError && <div className="imp-pop-error">{impError}</div>}
+                  <div className="imp-pop-actions">
+                    <button className="close-btn" onClick={() => setImpOpen(false)}>Cancel</button>
+                    <button className="consultant-primary-btn" onClick={startImpersonation}
+                            disabled={impBusy || !impEmail.trim()}>
+                      {impBusy ? 'Switching...' : 'View as'}
+                    </button>
+                  </div>
+                  <div className="imp-pop-note">
+                    Ends after 1 hour, or when you press Exit. Actions are
+                    recorded against both accounts.
+                  </div>
+                </div>
+              )}
             </div>
           )}
           {authUser?.authenticated && (
