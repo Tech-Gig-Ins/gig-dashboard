@@ -6,10 +6,13 @@
 //
 // Source is the Cognito user pool, so the list is whoever has actually signed
 // in - users are created on first Google sign-in, not provisioned ahead of time.
+//
+// Also feeds the Users & Roles tab, so each user carries the date they first
+// signed in and their current Welfare access.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { CognitoIdentityProviderClient, ListUsersCommand } from '@aws-sdk/client-cognito-identity-provider';
-import { getSession } from '@/lib/auth';
+import { getSession, readGrants, activeGrantFor, type WelfareGrant } from '@/lib/auth';
 
 const REGION = process.env.COGNITO_REGION || process.env.MY_AWS_REGION || 'us-east-1';
 const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID!;
@@ -32,6 +35,27 @@ function attr(user: any, name: string): string {
   return String(found?.Value || '').trim();
 }
 
+type WelfareStatus = {
+  status: 'always' | 'active' | 'expired' | 'revoked' | 'none';
+  // active: when it ends. expired: when it ended. revoked: when it was revoked.
+  at?: string;
+};
+
+// One user's Welfare access, read from the same grants file the Welfare tab
+// uses, so both views always agree.
+function welfareStatusFor(role: string, email: string, grants: WelfareGrant[]): WelfareStatus {
+  if (role === 'Admin') return { status: 'always' };
+  const live = activeGrantFor(grants, email);
+  if (live) return { status: 'active', at: live.expiresAt };
+  const latest = grants
+    .filter(g => String(g.email || '').toLowerCase() === email)
+    .sort((a, b) => Date.parse(b.grantedAt) - Date.parse(a.grantedAt))[0];
+  if (!latest) return { status: 'none' };
+  return latest.revokedAt
+    ? { status: 'revoked', at: latest.revokedAt }
+    : { status: 'expired', at: latest.expiresAt };
+}
+
 export async function GET(req: NextRequest) {
   const session = await getSession(req);
   if (!session) {
@@ -47,8 +71,14 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const users: Array<{ email: string; name: string; role: string; enabled: boolean }> = [];
+    const users: Array<{
+      email: string; name: string; role: string; enabled: boolean;
+      createdAt: string | null; welfare: WelfareStatus;
+    }> = [];
     let token: string | undefined;
+    // readGrants returns an empty list if the file is missing or unreadable,
+    // so a grants problem never breaks the user list.
+    const grants = await readGrants();
 
     do {
       const page = await cognito.send(new ListUsersCommand({
@@ -61,15 +91,19 @@ export async function GET(req: NextRequest) {
         if (!email) continue;
         const given = attr(u, 'given_name');
         const family = attr(u, 'family_name');
+        const role = ADMIN_EMAILS.includes(email)
+          ? 'Admin'
+          : PLATFORM_ADMIN_EMAILS.includes(email)
+            ? 'Platform Admin'
+            : 'Member';
         users.push({
           email,
           name: [given, family].filter(Boolean).join(' ') || email,
-          role: ADMIN_EMAILS.includes(email)
-            ? 'Admin'
-            : PLATFORM_ADMIN_EMAILS.includes(email)
-              ? 'Platform Admin'
-              : 'Member',
+          role,
           enabled: u.Enabled !== false,
+          // Cognito creates the user on their first Google sign-in.
+          createdAt: u.UserCreateDate ? new Date(u.UserCreateDate).toISOString() : null,
+          welfare: welfareStatusFor(role, email, grants),
         });
       }
       token = page.PaginationToken;

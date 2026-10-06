@@ -56,7 +56,7 @@ type SearchResponse = {
   results: SearchMatch[];
 };
 
-type TabKey = 'master' | 'all-info' | 'consultant' | 'billing' | 'welfare';
+type TabKey = 'master' | 'all-info' | 'consultant' | 'billing' | 'welfare' | 'users';
 
 type MemberRecord = {
   memberName: string;
@@ -450,6 +450,9 @@ export default function Dashboard() {
     { key: 'consultant', label: 'Consultant Report' },
     { key: 'billing',    label: 'Billing' },
     { key: 'welfare',    label: 'Welfare' },
+    // Admin and Platform Admin only. Members never see it in the rail, and
+    // /api/users refuses them server-side anyway.
+    { key: 'users',      label: 'Users & Roles', adminOnly: true },
   ];
 
   // Set true when the deployed build no longer matches the one this tab loaded.
@@ -681,7 +684,26 @@ export default function Dashboard() {
   // admin's powers. The banner exists so the current identity is never in doubt.
   // Registered dashboard users, for both pickers. Sourced from Cognito, so it
   // is whoever has actually signed in.
-  type DirUser = { email: string; name: string; role: string; enabled: boolean };
+  type DirUser = {
+    email: string; name: string; role: string; enabled: boolean;
+    createdAt?: string | null;
+    welfare?: { status: 'always' | 'active' | 'expired' | 'revoked' | 'none'; at?: string };
+  };
+
+  // Users & Roles tab. Order is highest role first. The text must match what
+  // the server actually enforces; update it whenever a permission changes.
+  const ROLE_ORDER = ['Admin', 'Platform Admin', 'Member'];
+  const ROLE_CAN_DO: Record<string, string> = {
+    'Admin':
+      'View every tab. Upload, move and include files. Generate consultant report. ' +
+      'Upload and approve billing. Always has Welfare. Grants and revokes Welfare access.',
+    'Platform Admin':
+      'Everything an Admin can do except Welfare and granting. "View as" any user ' +
+      "for 1 hour. Welfare only with an Admin's grant.",
+    'Member':
+      'View Master, All Info, Billing and Consultant. Download reports. Upload billing ' +
+      'update files (an Admin approves them). Welfare only with a grant.',
+  };
   const [dirUsers, setDirUsers] = useState<DirUser[] | null>(null);
   const [dirError, setDirError] = useState<string | null>(null);
 
@@ -696,6 +718,13 @@ export default function Dashboard() {
       setDirError('Could not load users');
     }
   }
+
+  // Fresh list each time the Users & Roles tab opens, so new sign-ins and
+  // grant changes show without a page reload.
+  useEffect(() => {
+    if (activeTab === 'users' && canManage) loadUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, canManage]);
 
   const [impOpen, setImpOpen] = useState(false);
   const [impEmail, setImpEmail] = useState('');
@@ -2635,6 +2664,10 @@ export default function Dashboard() {
         .grant-expired { color: rgba(255,255,255,0.4); }
         .grant-revoked { color: #ff8888; }
         .grant-empty { color: rgba(255,255,255,0.45); font-size: 13px; font-style: italic; }
+        .roles-table td.roles-role { vertical-align: top; text-align: left; font-weight: 600; color: #ffffff; }
+        .roles-table td.roles-cando { vertical-align: top; text-align: left; white-space: normal; min-width: 280px; max-width: 380px; color: rgba(255,255,255,0.7); font-size: 12px; }
+        .roles-table td.roles-left { text-align: left; }
+        .roles-table tr.roles-group-start td { border-top: 2px solid rgba(107,164,255,0.25); }
         .welfare-notes { background: rgba(107,164,255,0.05); border: 1px solid rgba(107,164,255,0.2); border-radius: 10px; padding: 18px 22px; margin-bottom: 22px; }
         .welfare-notes-title { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(107,164,255,0.9); font-weight: 600; margin-bottom: 12px; }
         .welfare-notes ul { margin: 0; padding-left: 20px; }
@@ -3191,7 +3224,7 @@ export default function Dashboard() {
 
       {/* The only navigation. Replaces the old tab bar entirely. */}
       <nav className="section-rail">
-        {NAV_ITEMS.map(n => {
+        {NAV_ITEMS.filter(n => !n.adminOnly || canManage).map(n => {
           // Welfare stays visible to everyone but is locked until an admin
           // grants access. Hiding it would leave people unable to ask for it.
           const locked = n.key === 'welfare' && !welfareUnlocked;
@@ -4632,6 +4665,99 @@ export default function Dashboard() {
                   </table>
                 </div>
               </>
+            )}
+          </div>
+        )}
+
+        {/* ==================== USERS & ROLES TAB ==================== */}
+        {activeTab === 'users' && canManage && (
+          <div className="tab-panel">
+            <div className="consultant-header">
+              <div>
+                <h2 className="consultant-title">Users &amp; Roles</h2>
+                <div className="consultant-sub">
+                  Everyone who has signed in, highest role first. Roles are set by the
+                  ADMIN_EMAILS and PLATFORM_ADMIN_EMAILS settings in Amplify.
+                </div>
+              </div>
+            </div>
+
+            {dirError && <div className="consultant-error">{dirError}</div>}
+            {!dirUsers && !dirError && <div className="loading-state">Loading users...</div>}
+
+            {dirUsers && (
+              <div className="master-table-wrapper">
+                <table className="master-table roles-table">
+                  <thead>
+                    <tr>
+                      <th>Role</th><th>What this role can do</th><th>Name</th>
+                      <th>Email</th><th>Account</th><th>First sign-in</th><th>Welfare access</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ROLE_ORDER.flatMap(role => {
+                      const group = dirUsers.filter(u => u.role === role);
+                      const span = Math.max(group.length, 1);
+                      const roleCells = (
+                        <>
+                          <td className="roles-role" rowSpan={span}>{role}</td>
+                          <td className="roles-cando" rowSpan={span}>{ROLE_CAN_DO[role]}</td>
+                        </>
+                      );
+                      // Keep the role visible even with nobody in it, so the
+                      // table always explains all three roles.
+                      if (group.length === 0) {
+                        return [(
+                          <tr key={`${role}-empty`} className="roles-group-start">
+                            {roleCells}
+                            <td colSpan={5} className="grant-empty roles-left">No accounts with this role</td>
+                          </tr>
+                        )];
+                      }
+                      return group.map((u, i) => {
+                        const w = u.welfare;
+                        const left = w?.status === 'active' && w.at ? Date.parse(w.at) - nowTick : 0;
+                        let welfareCell = <span className="grant-expired">None</span>;
+                        if (w?.status === 'always') {
+                          welfareCell = <span className="grant-active">Always</span>;
+                        } else if (w?.status === 'active' && left > 0) {
+                          welfareCell = <span className="grant-active">Granted, {formatRemaining(left)} left</span>;
+                        } else if (w?.status === 'active' || w?.status === 'expired') {
+                          welfareCell = (
+                            <span className="grant-expired">
+                              Expired {w.at ? new Date(w.at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                            </span>
+                          );
+                        } else if (w?.status === 'revoked') {
+                          welfareCell = (
+                            <span className="grant-revoked">
+                              Revoked {w.at ? new Date(w.at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
+                            </span>
+                          );
+                        }
+                        return (
+                          <tr key={u.email} className={i === 0 ? 'roles-group-start' : ''}>
+                            {i === 0 && roleCells}
+                            <td className="roles-left">{u.name}</td>
+                            <td className="roles-left">{u.email}</td>
+                            <td>
+                              {u.enabled
+                                ? <span className="grant-active">Active</span>
+                                : <span className="grant-revoked">Disabled</span>}
+                            </td>
+                            <td>
+                              {u.createdAt
+                                ? new Date(u.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+                                : ''}
+                            </td>
+                            <td>{welfareCell}</td>
+                          </tr>
+                        );
+                      });
+                    })}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         )}
