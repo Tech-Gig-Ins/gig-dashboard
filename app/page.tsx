@@ -687,22 +687,34 @@ export default function Dashboard() {
   type DirUser = {
     email: string; name: string; role: string; enabled: boolean;
     createdAt?: string | null;
+    lastActive?: string | null;
     welfare?: { status: 'always' | 'active' | 'expired' | 'revoked' | 'none'; at?: string };
   };
 
   // Users & Roles tab. Order is highest role first. The text must match what
   // the server actually enforces; update it whenever a permission changes.
   const ROLE_ORDER = ['Admin', 'Platform Admin', 'Member'];
-  const ROLE_CAN_DO: Record<string, string> = {
-    'Admin':
-      'View every tab. Upload, move and include files. Generate consultant report. ' +
-      'Upload and approve billing. Always has Welfare. Grants and revokes Welfare access.',
-    'Platform Admin':
-      'Everything an Admin can do except Welfare and granting. "View as" any user ' +
-      "for 1 hour. Welfare only with an Admin's grant.",
-    'Member':
-      'View Master, All Info, Billing and Consultant. Download reports. Upload billing ' +
-      'update files (an Admin approves them). Welfare only with a grant.',
+  const ROLE_CAN_DO: Record<string, string[]> = {
+    'Admin': [
+      'Access to all tabs',
+      'Upload, move and include files',
+      'Generate consultant reports',
+      'Upload and approve billing files',
+      'Permanent Welfare access',
+      'Provide and revoke Welfare access',
+    ],
+    'Platform Admin': [
+      'All Admin permissions, excluding Welfare',
+      'Access the dashboard as another user for 1 hour',
+      'Welfare access only when provided by an Admin',
+      'Cannot provide Welfare access',
+    ],
+    'Member': [
+      'Access to all tabs, excluding Welfare',
+      'Download reports',
+      'Upload billing update files',
+      'Welfare access only when provided by an Admin',
+    ],
   };
   const [dirUsers, setDirUsers] = useState<DirUser[] | null>(null);
   const [dirError, setDirError] = useState<string | null>(null);
@@ -2667,6 +2679,8 @@ export default function Dashboard() {
         .roles-table td.roles-role { vertical-align: top; text-align: left; font-weight: 600; color: #ffffff; }
         .roles-table td.roles-cando { vertical-align: top; text-align: left; white-space: normal; min-width: 280px; max-width: 380px; color: rgba(255,255,255,0.7); font-size: 12px; }
         .roles-table td.roles-left { text-align: left; }
+        .roles-points { margin: 0; padding-left: 16px; }
+        .roles-points li { margin: 2px 0; }
         .roles-table tr.roles-group-start td { border-top: 2px solid rgba(107,164,255,0.25); }
         .welfare-notes { background: rgba(107,164,255,0.05); border: 1px solid rgba(107,164,255,0.2); border-radius: 10px; padding: 18px 22px; margin-bottom: 22px; }
         .welfare-notes-title { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(107,164,255,0.9); font-weight: 600; margin-bottom: 12px; }
@@ -4675,10 +4689,6 @@ export default function Dashboard() {
             <div className="consultant-header">
               <div>
                 <h2 className="consultant-title">Users &amp; Roles</h2>
-                <div className="consultant-sub">
-                  Everyone who has signed in, highest role first. Roles are set by the
-                  ADMIN_EMAILS and PLATFORM_ADMIN_EMAILS settings in Amplify.
-                </div>
               </div>
             </div>
 
@@ -4691,7 +4701,8 @@ export default function Dashboard() {
                   <thead>
                     <tr>
                       <th>Role</th><th>What this role can do</th><th>Name</th>
-                      <th>Email</th><th>Account</th><th>First sign-in</th><th>Welfare access</th>
+                      <th>Email</th><th>Account</th><th>Last active</th>
+                      <th>First sign-in</th><th>Welfare access</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -4701,7 +4712,11 @@ export default function Dashboard() {
                       const roleCells = (
                         <>
                           <td className="roles-role" rowSpan={span}>{role}</td>
-                          <td className="roles-cando" rowSpan={span}>{ROLE_CAN_DO[role]}</td>
+                          <td className="roles-cando" rowSpan={span}>
+                            <ul className="roles-points">
+                              {ROLE_CAN_DO[role].map(p => <li key={p}>{p}</li>)}
+                            </ul>
+                          </td>
                         </>
                       );
                       // Keep the role visible even with nobody in it, so the
@@ -4710,7 +4725,7 @@ export default function Dashboard() {
                         return [(
                           <tr key={`${role}-empty`} className="roles-group-start">
                             {roleCells}
-                            <td colSpan={5} className="grant-empty roles-left">No accounts with this role</td>
+                            <td colSpan={6} className="grant-empty roles-left">No accounts with this role</td>
                           </tr>
                         )];
                       }
@@ -4744,6 +4759,11 @@ export default function Dashboard() {
                               {u.enabled
                                 ? <span className="grant-active">Active</span>
                                 : <span className="grant-revoked">Disabled</span>}
+                            </td>
+                            <td>
+                              {u.lastActive
+                                ? new Date(u.lastActive).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+                                : <span className="grant-expired">Not recorded yet</span>}
                             </td>
                             <td>
                               {u.createdAt

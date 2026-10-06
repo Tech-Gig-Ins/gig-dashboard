@@ -8,11 +8,12 @@
 // in - users are created on first Google sign-in, not provisioned ahead of time.
 //
 // Also feeds the Users & Roles tab, so each user carries the date they first
-// signed in and their current Welfare access.
+// signed in, when they were last active, and their current Welfare access.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { CognitoIdentityProviderClient, ListUsersCommand } from '@aws-sdk/client-cognito-identity-provider';
 import { getSession, readGrants, activeGrantFor, type WelfareGrant } from '@/lib/auth';
+import { readLastActive } from '@/lib/activity';
 
 const REGION = process.env.COGNITO_REGION || process.env.MY_AWS_REGION || 'us-east-1';
 const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID!;
@@ -73,7 +74,7 @@ export async function GET(req: NextRequest) {
   try {
     const users: Array<{
       email: string; name: string; role: string; enabled: boolean;
-      createdAt: string | null; welfare: WelfareStatus;
+      createdAt: string | null; welfare: WelfareStatus; lastActive: string | null;
     }> = [];
     let token: string | undefined;
     // readGrants returns an empty list if the file is missing or unreadable,
@@ -104,10 +105,16 @@ export async function GET(req: NextRequest) {
           // Cognito creates the user on their first Google sign-in.
           createdAt: u.UserCreateDate ? new Date(u.UserCreateDate).toISOString() : null,
           welfare: welfareStatusFor(role, email, grants),
+          lastActive: null,
         });
       }
       token = page.PaginationToken;
     } while (token);
+
+    // Read after the list is built, in parallel. A missing file just means
+    // no activity has been recorded for that user yet.
+    const lastActive = await readLastActive(users.map(u => u.email));
+    for (const u of users) u.lastActive = lastActive[u.email] ?? null;
 
     users.sort((a, b) => a.name.localeCompare(b.name));
     return NextResponse.json({ users });

@@ -8,12 +8,17 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
+import { recordActivity } from '@/lib/activity';
 
 export async function GET(req: NextRequest) {
   const session = await getSession(req);
   if (!session) {
     return NextResponse.json({ authenticated: false }, { status: 401 });
   }
+  // The dashboard calls this on every page load, so it is where "Last active"
+  // is recorded. While using "View as", the real person is recorded, not the
+  // account being viewed.
+  await recordActivity(session.actualEmail || session.email);
   return NextResponse.json({
     authenticated: true,
     email: session.email,
