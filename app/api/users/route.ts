@@ -68,7 +68,7 @@ export async function GET(req: NextRequest) {
             ? 'Admin'
             : PLATFORM_ADMIN_EMAILS.includes(email)
               ? 'Platform Admin'
-              : 'Viewer',
+              : 'Member',
           enabled: u.Enabled !== false,
         });
       }

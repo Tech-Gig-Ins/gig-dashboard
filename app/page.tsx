@@ -2594,7 +2594,7 @@ export default function Dashboard() {
         .imp-pop-error { color: #ff8888; font-size: 12px; }
         .imp-pop-note { font-size: 11px; color: rgba(255,255,255,0.4); line-height: 1.6; text-transform: none; letter-spacing: 0; }
         .user-badge-platform { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: #c9a3ff; background: rgba(201,163,255,0.12); border: 1px solid rgba(201,163,255,0.4); padding: 2px 7px; border-radius: 3px; }
-        .user-badge-viewer { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: rgba(107,164,255,0.9); background: rgba(107,164,255,0.1); border: 1px solid rgba(107,164,255,0.35); padding: 2px 7px; border-radius: 3px; }
+        .user-badge-member { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: rgba(107,164,255,0.9); background: rgba(107,164,255,0.1); border: 1px solid rgba(107,164,255,0.35); padding: 2px 7px; border-radius: 3px; }
         .signout-btn { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.55); border: 1px solid rgba(255,255,255,0.16); border-radius: 6px; padding: 6px 14px; text-decoration: none; transition: all 0.15s ease; white-space: nowrap; }
         .signout-btn:hover { color: #ffffff; border-color: rgba(255,136,136,0.5); background: rgba(255,136,136,0.08); }
         .header-meta { font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: rgba(255, 255, 255, 0.4); display: flex; gap: 24px; align-items: center; }
@@ -3131,7 +3131,7 @@ export default function Dashboard() {
                   <span className="user-badge-platform">Platform Admin</span>
                 )}
                 {!authUser.isAdmin && !authUser.isPlatformAdmin && (
-                  <span className="user-badge-viewer">Viewer</span>
+                  <span className="user-badge-member">Member</span>
                 )}
               </div>
               <div className="user-chip-email">{authUser.email}</div>
@@ -3243,7 +3243,7 @@ export default function Dashboard() {
               </div>
               <button className="search-btn" onClick={triggerAllInfoSearch}>Search</button>
               {/* Admin only. /api/master/upload enforces requireAdmin server-side;
-                  hiding it keeps viewers from seeing a control that would 403.
+                  hiding it keeps members from seeing a control that would 403.
                   Replaces the old "access only to admin - Andrew" note, which was
                   documentation rather than an actual restriction. */}
               {canManage && (
@@ -4862,7 +4862,7 @@ export default function Dashboard() {
                                   ) : canManage ? (
                                     /* Admins only. The server enforces this too
                                        (requireAdmin on /api/billing/approve);
-                                       hiding the button is just so viewers are
+                                       hiding the button is just so members are
                                        not shown a control they cannot use. */
                                     <button
                                       className="update-approve-btn"

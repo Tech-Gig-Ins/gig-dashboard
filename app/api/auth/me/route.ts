@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
     isAdmin: session.isAdmin,
     // Full technical access, but the Welfare tab still needs an admin's
     // time-boxed grant. Without this field the UI treats the user as a
-    // viewer and hides Upload, Move and the billing controls.
+    // member and hides Upload, Move and the billing controls.
     isPlatformAdmin: session.isPlatformAdmin,
     // Present only while impersonating, so the UI can show the banner and the
     // header can name who is really signed in.
