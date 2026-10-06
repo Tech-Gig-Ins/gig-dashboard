@@ -452,7 +452,7 @@ export default function Dashboard() {
     { key: 'welfare',    label: 'Welfare' },
     // Admin and Platform Admin only. Members never see it in the rail, and
     // /api/users refuses them server-side anyway.
-    { key: 'users',      label: 'Users & Roles', adminOnly: true },
+    { key: 'users',      label: 'Users', adminOnly: true },
   ];
 
   // Set true when the deployed build no longer matches the one this tab loaded.
@@ -705,7 +705,7 @@ export default function Dashboard() {
     ],
     'Platform Admin': [
       'All Admin permissions, excluding Welfare',
-      'Access the dashboard as another user for 1 hour',
+      'Proxy as any user for up to 1 hour',
       'Welfare access only when provided by an Admin',
       'Cannot provide Welfare access',
     ],
@@ -2679,8 +2679,11 @@ export default function Dashboard() {
         .roles-table td.roles-role { vertical-align: top; text-align: left; font-weight: 600; color: #ffffff; }
         .roles-table td.roles-cando { vertical-align: top; text-align: left; white-space: normal; min-width: 280px; max-width: 380px; color: rgba(255,255,255,0.7); font-size: 12px; }
         .roles-table td.roles-left { text-align: left; }
-        .roles-points { margin: 0; padding-left: 16px; }
-        .roles-points li { margin: 2px 0; }
+        .roles-intro { font-size: 13px; line-height: 1.7; color: rgba(255,255,255,0.62); text-align: center; margin: 4px auto 28px; }
+        /* Tailwind's reset removes list bullets, so they are turned back on here. */
+        .roles-points { list-style: disc; margin: 0; padding-left: 18px; }
+        .roles-points li { margin: 3px 0; line-height: 1.6; }
+        .roles-points li::marker { color: rgba(107,164,255,0.8); }
         .roles-table tr.roles-group-start td { border-top: 2px solid rgba(107,164,255,0.25); }
         .welfare-notes { background: rgba(107,164,255,0.05); border: 1px solid rgba(107,164,255,0.2); border-radius: 10px; padding: 18px 22px; margin-bottom: 22px; }
         .welfare-notes-title { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(107,164,255,0.9); font-weight: 600; margin-bottom: 12px; }
@@ -4683,14 +4686,12 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* ==================== USERS & ROLES TAB ==================== */}
+        {/* ==================== USERS TAB ==================== */}
         {activeTab === 'users' && canManage && (
           <div className="tab-panel">
-            <div className="consultant-header">
-              <div>
-                <h2 className="consultant-title">Users &amp; Roles</h2>
-              </div>
-            </div>
+            <p className="roles-intro">
+              Everyone who has signed in to the dashboard, grouped by role, with permissions, account status, recent activity and Welfare access.
+            </p>
 
             {dirError && <div className="consultant-error">{dirError}</div>}
             {!dirUsers && !dirError && <div className="loading-state">Loading users...</div>}
@@ -4700,7 +4701,7 @@ export default function Dashboard() {
                 <table className="master-table roles-table">
                   <thead>
                     <tr>
-                      <th>Role</th><th>What this role can do</th><th>Name</th>
+                      <th>Role</th><th>Permissions</th><th>Name</th>
                       <th>Email</th><th>Account</th><th>Last active</th>
                       <th>First sign-in</th><th>Welfare access</th>
                     </tr>
