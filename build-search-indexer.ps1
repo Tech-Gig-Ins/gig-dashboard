@@ -18,11 +18,14 @@ if (Test-Path $zip) { Remove-Item $zip -Force }
 New-Item -ItemType Directory -Path $out | Out-Null
 
 # The AWS SDK is already inside the Lambda Node.js runtime, so it is left out.
-npx --yes esbuild@0.24.0 (Join-Path $root 'lambda\search-indexer\index.ts') `
-  --bundle --platform=node --target=node22 --format=cjs `
-  --external:@aws-sdk/* `
-  --tsconfig=(Join-Path $root 'tsconfig.json') `
-  --outfile=(Join-Path $out 'index.js')
+# Each option is built as one complete string first: writing --x=(Join-Path ...)
+# inline makes PowerShell pass "--x=" and the path as two separate arguments.
+$entry      = Join-Path $root 'lambda\search-indexer\index.ts'
+$tsconfigArg = "--tsconfig=$(Join-Path $root 'tsconfig.json')"
+$outfileArg  = "--outfile=$(Join-Path $out 'index.js')"
+$esbuildArgs = @($entry, '--bundle', '--platform=node', '--target=node22', '--format=cjs',
+                 '--external:@aws-sdk/*', $tsconfigArg, $outfileArg)
+npx --yes esbuild@0.24.0 @esbuildArgs
 if ($LASTEXITCODE -ne 0) { throw "esbuild failed" }
 
 Compress-Archive -Path (Join-Path $out 'index.js') -DestinationPath $zip -Force
