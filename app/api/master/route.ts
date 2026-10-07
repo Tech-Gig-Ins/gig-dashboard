@@ -36,7 +36,7 @@ export async function GET(req: Request) {
     console.log('[master]', JSON.stringify({ view: summary ? 'summary' : 'full', source, ms }));
 
     const etag = `"${fingerprint}${summary ? '-s' : ''}"`;
-    const headers = { 'Cache-Control': 'private, no-cache', ETag: etag };
+    const headers = { 'Cache-Control': 'private, no-store', ETag: etag };
     if (req.headers.get('if-none-match') === etag) return new NextResponse(null, { status: 304, headers });
 
     if (!summary) return NextResponse.json(result, { headers });

@@ -20,6 +20,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import * as XLSX from 'xlsx';
 import { requireWelfareAccess } from '@/lib/auth';
+import { cachedJson } from '@/lib/responseCache';
 
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
@@ -313,180 +314,192 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // File selection, two different rules:
-    //
-    //   REMITTANCES - only files INCLUDED in All Info for this month. This is
-    //     what disambiguates carriers with several remittance files. Cassena
-    //     ships Invoice / Vision / main remittances that all classify the same
-    //     way, and picking by S3 listing order grabbed the Invoice file: 1018
-    //     enrolled and no welfare column, so the amount came out as zero.
-    //
-    //   CREDITS - any file for the month that is not an auto-excluded type.
-    //     Credits are routinely left un-included so they don't disturb the
-    //     consultant report, so requiring inclusion would silently zero them.
-    const [, mm] = prefix.split('-');
-    const targetMonth = parseInt(mm, 10) - 1;
-    const targetYear = parseInt(prefix.split('-')[0], 10);
+    // Cached by the ETags of this month's manifest and every carrier= file.
+    // Memory only (persist: false): fee rates live in this code, so a deploy
+    // must never reuse figures computed by an older version. Access was
+    // checked above, before the cache. compute() is the original code.
+    const { status, body, source } = await cachedJson({
+      name: 'welfare', version: 'v1', params: month,
+      prefixes: [`manifests/${prefix}.json`, 'carrier='], persist: false,
+      compute: async () => {
+        // File selection, two different rules:
+        //
+        //   REMITTANCES - only files INCLUDED in All Info for this month. This is
+        //     what disambiguates carriers with several remittance files. Cassena
+        //     ships Invoice / Vision / main remittances that all classify the same
+        //     way, and picking by S3 listing order grabbed the Invoice file: 1018
+        //     enrolled and no welfare column, so the amount came out as zero.
+        //
+        //   CREDITS - any file for the month that is not an auto-excluded type.
+        //     Credits are routinely left un-included so they don't disturb the
+        //     consultant report, so requiring inclusion would silently zero them.
+        const [, mm] = prefix.split('-');
+        const targetMonth = parseInt(mm, 10) - 1;
+        const targetYear = parseInt(prefix.split('-')[0], 10);
 
-    // Credits come from the PRIOR month: remittances cover the current coverage
-    // month while credits cover the prior work period. For August 2026 the
-    // credit files are July 2026's.
-    const prevDate = new Date(targetYear, targetMonth - 1, 1);
-    const prevYear = prevDate.getFullYear();
-    const prevMonth = prevDate.getMonth();
-    const prevLabel = `${MONTH_NAMES[prevMonth]} ${prevYear}`;
+        // Credits come from the PRIOR month: remittances cover the current coverage
+        // month while credits cover the prior work period. For August 2026 the
+        // credit files are July 2026's.
+        const prevDate = new Date(targetYear, targetMonth - 1, 1);
+        const prevYear = prevDate.getFullYear();
+        const prevMonth = prevDate.getMonth();
+        const prevLabel = `${MONTH_NAMES[prevMonth]} ${prevYear}`;
 
-    let includedKeys = new Set<string>();
-    try {
-      const m = await s3.send(new GetObjectCommand({
-        Bucket: BUCKET, Key: `manifests/${prefix}.json`,
-      }));
-      const parsed = JSON.parse((await toBuffer(m.Body as any)).toString('utf8'));
-      includedKeys = new Set<string>(Array.isArray(parsed.included) ? parsed.included : []);
-    } catch {
-      // No manifest yet: remittance rows will be empty and the warning below
-      // explains why, rather than silently reporting zeros.
-    }
+        let includedKeys = new Set<string>();
+        try {
+          const m = await s3.send(new GetObjectCommand({
+            Bucket: BUCKET, Key: `manifests/${prefix}.json`,
+          }));
+          const parsed = JSON.parse((await toBuffer(m.Body as any)).toString('utf8'));
+          includedKeys = new Set<string>(Array.isArray(parsed.included) ? parsed.included : []);
+        } catch {
+          // No manifest yet: remittance rows will be empty and the warning below
+          // explains why, rather than silently reporting zeros.
+        }
 
-    const keys: string[] = [];
-    let token: string | undefined;
-    do {
-      const page = await s3.send(new ListObjectsV2Command({
-        Bucket: BUCKET, Prefix: 'carrier=', ContinuationToken: token,
-      }));
-      for (const o of page.Contents || []) {
-        const k = o.Key || '';
-        if (!k || k.endsWith('/')) continue;
-        const lower = k.toLowerCase();
-        // .pdf/.zip are the auto-excluded types; they never carry member rows.
-        if (lower.endsWith('.pdf') || lower.endsWith('.zip')) continue;
-        if (!lower.endsWith('.csv') && !lower.endsWith('.xlsx') && !lower.endsWith('.xls')) continue;
-        keys.push(k);
-      }
-      token = page.IsTruncated ? page.NextContinuationToken : undefined;
-    } while (token);
+        const keys: string[] = [];
+        let token: string | undefined;
+        do {
+          const page = await s3.send(new ListObjectsV2Command({
+            Bucket: BUCKET, Prefix: 'carrier=', ContinuationToken: token,
+          }));
+          for (const o of page.Contents || []) {
+            const k = o.Key || '';
+            if (!k || k.endsWith('/')) continue;
+            const lower = k.toLowerCase();
+            // .pdf/.zip are the auto-excluded types; they never carry member rows.
+            if (lower.endsWith('.pdf') || lower.endsWith('.zip')) continue;
+            if (!lower.endsWith('.csv') && !lower.endsWith('.xlsx') && !lower.endsWith('.xls')) continue;
+            keys.push(k);
+          }
+          token = page.IsTruncated ? page.NextContinuationToken : undefined;
+        } while (token);
 
-    const monthFiles = keys.filter(k => {
-      const d = detectMonthYear(k.split('/').pop() || '');
-      return d && d.year === targetYear && d.month === targetMonth;
-    });
-    const prevMonthFiles = keys.filter(k => {
-      const d = detectMonthYear(k.split('/').pop() || '');
-      return d && d.year === prevYear && d.month === prevMonth;
-    });
-
-    if (monthFiles.length === 0) {
-      return NextResponse.json({
-        error: `No files found for ${month}. Check the All Info tab.`,
-      }, { status: 404 });
-    }
-
-    // Remittances: included only. Credits: everything for the month.
-    const remByLabel = new Map<string, string>();
-    const remCandidates = new Map<string, string[]>();
-    const credByLabel = new Map<string, string>();
-
-    // Remittances: this month, included files only.
-    for (const key of monthFiles) {
-      const label = classify(key.split('/').pop() || '');
-      if (label === 'unknown' || label.toLowerCase().includes('credits')) continue;
-      if (!includedKeys.has(key)) continue;
-      remCandidates.set(label, [...(remCandidates.get(label) || []), key]);
-      if (!remByLabel.has(label)) remByLabel.set(label, key);
-    }
-
-    // Credits: PRIOR month, any Include status.
-    for (const key of prevMonthFiles) {
-      const label = classify(key.split('/').pop() || '');
-      if (!label.toLowerCase().includes('credits')) continue;
-      if (!credByLabel.has(label)) credByLabel.set(label, key);
-    }
-
-    const rateTable = ratesFor(prefix);
-
-    const out = [];
-    for (const spec of ROWS) {
-      // Rows introduced with a later template do not exist for earlier months.
-      if (spec.since && prefix < spec.since) continue;
-
-      const [capRate, creditRate] = rateTable[spec.label] ?? [0, 0];
-
-      // Rows with no associated file render blank, as requested.
-      if (!spec.remittance) {
-        out.push({
-          label: spec.label, capRate, creditRate, mapped: false,
-          remittanceFile: null, creditFile: null,
-          amount: null, enrolled: null, capFee: null,
-          creditAmount: null, creditCount: null, creditFees: null, nypWire: null,
+        const monthFiles = keys.filter(k => {
+          const d = detectMonthYear(k.split('/').pop() || '');
+          return d && d.year === targetYear && d.month === targetMonth;
         });
-        continue;
-      }
+        const prevMonthFiles = keys.filter(k => {
+          const d = detectMonthYear(k.split('/').pop() || '');
+          return d && d.year === prevYear && d.month === prevMonth;
+        });
 
-      const remKey = remByLabel.get(spec.remittance) || null;
-      const credKey = spec.credits ? (credByLabel.get(spec.credits) || null) : null;
+        if (monthFiles.length === 0) {
+          return { status: 404, body: {
+            error: `No files found for ${month}. Check the All Info tab.`,
+          } };
+        }
 
-      const rem = remKey ? await parseFile(remKey, spec.groupFilter, spec.excludeGroup) : null;
-      // Credits are counted raw: no dedup, per the operator's instruction.
-      const cred = credKey ? await parseFile(credKey) : null;
+        // Remittances: included only. Credits: everything for the month.
+        const remByLabel = new Map<string, string>();
+        const remCandidates = new Map<string, string[]>();
+        const credByLabel = new Map<string, string>();
 
-      const amount = rem?.amount ?? 0;
-      const enrolled = rem?.distinct ?? 0;
-      const capFee = enrolled * capRate;
-      // Credits files store their values as NEGATIVES. The template's formula
-      // (=C-E-F+H) expects F to be a positive magnitude, so a negative F would
-      // ADD the credit to the wire instead of subtracting it. Take the
-      // magnitude so the arithmetic matches the spreadsheet exactly.
-      const creditAmountRaw = cred?.amount ?? 0;
-      const creditAmount = Math.abs(creditAmountRaw);
-      const creditCount = cred?.rowCount ?? 0;
-      const creditFees = creditCount * creditRate;
+        // Remittances: this month, included files only.
+        for (const key of monthFiles) {
+          const label = classify(key.split('/').pop() || '');
+          if (label === 'unknown' || label.toLowerCase().includes('credits')) continue;
+          if (!includedKeys.has(key)) continue;
+          remCandidates.set(label, [...(remCandidates.get(label) || []), key]);
+          if (!remByLabel.has(label)) remByLabel.set(label, key);
+        }
 
-      out.push({
-        label: spec.label,
-        capRate,
-        creditRate,
-        mapped: true,
-        remittanceFile: remKey ? remKey.split('/').pop() : null,
-        ambiguous: (remCandidates.get(spec.remittance!) || []).length > 1
-          ? (remCandidates.get(spec.remittance!) || []).map(k => k.split('/').pop())
-          : undefined,
-        creditFile: credKey ? credKey.split('/').pop() : null,
-        creditMonth: credKey ? prevLabel : null,
-        amountColumn: rem?.amountColumn ?? null,
-        rawRows: rem?.rowCount ?? 0,
-        amount, enrolled, capFee,
-        creditAmount, creditAmountRaw, creditCount, creditFees,
-        nypWire: amount - capFee - creditAmount + creditFees,
-      });
-    }
+        // Credits: PRIOR month, any Include status.
+        for (const key of prevMonthFiles) {
+          const label = classify(key.split('/').pop() || '');
+          if (!label.toLowerCase().includes('credits')) continue;
+          if (!credByLabel.has(label)) credByLabel.set(label, key);
+        }
 
-    const num = (v: number | null) => (typeof v === 'number' ? v : 0);
-    const totals = {
-      amount: out.reduce((s, r) => s + num(r.amount), 0),
-      enrolled: out.reduce((s, r) => s + num(r.enrolled), 0),
-      capFee: out.reduce((s, r) => s + num(r.capFee), 0),
-      creditAmount: out.reduce((s, r) => s + num(r.creditAmount), 0),
-      creditCount: out.reduce((s, r) => s + num(r.creditCount), 0),
-      creditFees: out.reduce((s, r) => s + num(r.creditFees), 0),
-      nypWire: out.reduce((s, r) => s + num(r.nypWire), 0),
-    };
+        const rateTable = ratesFor(prefix);
 
-    // Included files that matched no table row, so nothing is silently dropped.
-    const usedLabels = new Set(out.flatMap(r => [r.remittanceFile, r.creditFile].filter(Boolean)));
-    const eligible = [
-      ...monthFiles.filter(k => includedKeys.has(k)
-        && !classify(k.split('/').pop() || '').toLowerCase().includes('credits')),
-      ...prevMonthFiles.filter(k => classify(k.split('/').pop() || '').toLowerCase().includes('credits')),
-    ];
-    const unmapped = eligible
-      .map(k => k.split('/').pop() || '')
-      .filter(n => n && !usedLabels.has(n));
+        const out = [];
+        for (const spec of ROWS) {
+          // Rows introduced with a later template do not exist for earlier months.
+          if (spec.since && prefix < spec.since) continue;
 
-    const noManifest = includedKeys.size === 0;
+          const [capRate, creditRate] = rateTable[spec.label] ?? [0, 0];
 
-    return NextResponse.json({ month, monthPrefix: prefix, creditMonth: prevLabel,
-      rateSet: prefix >= RATE_CHANGE_MONTH ? 'current' : 'legacy', rateChangeMonth: RATE_CHANGE_MONTH,
-      rows: out, totals, unmapped, noManifest });
+          // Rows with no associated file render blank, as requested.
+          if (!spec.remittance) {
+            out.push({
+              label: spec.label, capRate, creditRate, mapped: false,
+              remittanceFile: null, creditFile: null,
+              amount: null, enrolled: null, capFee: null,
+              creditAmount: null, creditCount: null, creditFees: null, nypWire: null,
+            });
+            continue;
+          }
+
+          const remKey = remByLabel.get(spec.remittance) || null;
+          const credKey = spec.credits ? (credByLabel.get(spec.credits) || null) : null;
+
+          const rem = remKey ? await parseFile(remKey, spec.groupFilter, spec.excludeGroup) : null;
+          // Credits are counted raw: no dedup, per the operator's instruction.
+          const cred = credKey ? await parseFile(credKey) : null;
+
+          const amount = rem?.amount ?? 0;
+          const enrolled = rem?.distinct ?? 0;
+          const capFee = enrolled * capRate;
+          // Credits files store their values as NEGATIVES. The template's formula
+          // (=C-E-F+H) expects F to be a positive magnitude, so a negative F would
+          // ADD the credit to the wire instead of subtracting it. Take the
+          // magnitude so the arithmetic matches the spreadsheet exactly.
+          const creditAmountRaw = cred?.amount ?? 0;
+          const creditAmount = Math.abs(creditAmountRaw);
+          const creditCount = cred?.rowCount ?? 0;
+          const creditFees = creditCount * creditRate;
+
+          out.push({
+            label: spec.label,
+            capRate,
+            creditRate,
+            mapped: true,
+            remittanceFile: remKey ? remKey.split('/').pop() : null,
+            ambiguous: (remCandidates.get(spec.remittance!) || []).length > 1
+              ? (remCandidates.get(spec.remittance!) || []).map(k => k.split('/').pop())
+              : undefined,
+            creditFile: credKey ? credKey.split('/').pop() : null,
+            creditMonth: credKey ? prevLabel : null,
+            amountColumn: rem?.amountColumn ?? null,
+            rawRows: rem?.rowCount ?? 0,
+            amount, enrolled, capFee,
+            creditAmount, creditAmountRaw, creditCount, creditFees,
+            nypWire: amount - capFee - creditAmount + creditFees,
+          });
+        }
+
+        const num = (v: number | null) => (typeof v === 'number' ? v : 0);
+        const totals = {
+          amount: out.reduce((s, r) => s + num(r.amount), 0),
+          enrolled: out.reduce((s, r) => s + num(r.enrolled), 0),
+          capFee: out.reduce((s, r) => s + num(r.capFee), 0),
+          creditAmount: out.reduce((s, r) => s + num(r.creditAmount), 0),
+          creditCount: out.reduce((s, r) => s + num(r.creditCount), 0),
+          creditFees: out.reduce((s, r) => s + num(r.creditFees), 0),
+          nypWire: out.reduce((s, r) => s + num(r.nypWire), 0),
+        };
+
+        // Included files that matched no table row, so nothing is silently dropped.
+        const usedLabels = new Set(out.flatMap(r => [r.remittanceFile, r.creditFile].filter(Boolean)));
+        const eligible = [
+          ...monthFiles.filter(k => includedKeys.has(k)
+            && !classify(k.split('/').pop() || '').toLowerCase().includes('credits')),
+          ...prevMonthFiles.filter(k => classify(k.split('/').pop() || '').toLowerCase().includes('credits')),
+        ];
+        const unmapped = eligible
+          .map(k => k.split('/').pop() || '')
+          .filter(n => n && !usedLabels.has(n));
+
+        const noManifest = includedKeys.size === 0;
+
+        return { status: 200, body: { month, monthPrefix: prefix, creditMonth: prevLabel,
+          rateSet: prefix >= RATE_CHANGE_MONTH ? 'current' : 'legacy', rateChangeMonth: RATE_CHANGE_MONTH,
+          rows: out, totals, unmapped, noManifest } };
+      },
+    });
+    console.log('[welfare]', JSON.stringify({ source }));
+    return NextResponse.json(body, { status, headers: { 'Cache-Control': 'private, no-store' } });
   } catch (err: any) {
     console.error('[welfare] error:', err);
     return NextResponse.json({ error: err.message || 'Failed to build the welfare table' }, { status: 500 });

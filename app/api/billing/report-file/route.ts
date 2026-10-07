@@ -15,6 +15,7 @@ import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/clien
 import ExcelJS from 'exceljs';
 
 import { requireAuth } from '@/lib/auth';
+import { cachedJson } from '@/lib/responseCache';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 
@@ -317,56 +318,67 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // 1. Approved file wins
-    const approvedKey = await readApprovedKey(monthPrefix);
-    // 2. Otherwise the reconciliation output for the requested month
-    const key = approvedKey || (await findReconciliationForMonth(month));
+    // Cached by the ETags of this month's billing-updates folder (approval
+    // pointer and approved files) and of billing-reports/, so approving or
+    // regenerating is picked up at once. compute() is the original code.
+    const { status, body, source } = await cachedJson({
+      name: 'billing-report-file', version: 'v1', params: month,
+      prefixes: [`billing-updates/${monthPrefix}/`, 'billing-reports/'], persist: true,
+      compute: async () => {
+        // 1. Approved file wins
+        const approvedKey = await readApprovedKey(monthPrefix);
+        // 2. Otherwise the reconciliation output for the requested month
+        const key = approvedKey || (await findReconciliationForMonth(month));
 
-    if (!key) {
-      return NextResponse.json({
-        month,
-        monthPrefix,
-        sourceFile: null,
-        approvedKey: null,
-        lastModified: null,
-        sheets: [],
-        message: `No reconciliation output or approved file for ${month}.`,
-      });
-    }
-
-    let objRes: any;
-    try {
-      objRes = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
-    } catch (err: any) {
-      if ((err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) && approvedKey) {
-        // Approved key stale; fall back to the reconciliation file for the month
-        const fallback = await findReconciliationForMonth(month);
-        if (!fallback) {
-          return NextResponse.json({
-            month, monthPrefix,
-            sourceFile: null, approvedKey: null, lastModified: null, sheets: [],
-            message: `Approved file was removed and no reconciliation output for ${month}.`,
-          });
+        if (!key) {
+          return { status: 200, body: {
+            month,
+            monthPrefix,
+            sourceFile: null,
+            approvedKey: null,
+            lastModified: null,
+            sheets: [],
+            message: `No reconciliation output or approved file for ${month}.`,
+          } };
         }
-        objRes = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fallback }));
-      } else {
-        throw err;
-      }
-    }
 
-    const buffer = await streamToBuffer(objRes.Body);
-    const sheets = await parseWorkbook(buffer);
-    const filename = key.split('/').pop() || key;
+        let objRes: any;
+        try {
+          objRes = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+        } catch (err: any) {
+          if ((err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) && approvedKey) {
+            // Approved key stale; fall back to the reconciliation file for the month
+            const fallback = await findReconciliationForMonth(month);
+            if (!fallback) {
+              return { status: 200, body: {
+                month, monthPrefix,
+                sourceFile: null, approvedKey: null, lastModified: null, sheets: [],
+                message: `Approved file was removed and no reconciliation output for ${month}.`,
+              } };
+            }
+            objRes = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: fallback }));
+          } else {
+            throw err;
+          }
+        }
 
-    return NextResponse.json({
-      month,
-      monthPrefix,
-      sourceFile: key,
-      filename,
-      approvedKey,
-      lastModified: objRes.LastModified ? new Date(objRes.LastModified).toISOString() : null,
-      sheets,
+        const buffer = await streamToBuffer(objRes.Body);
+        const sheets = await parseWorkbook(buffer);
+        const filename = key.split('/').pop() || key;
+
+        return { status: 200, body: {
+          month,
+          monthPrefix,
+          sourceFile: key,
+          filename,
+          approvedKey,
+          lastModified: objRes.LastModified ? new Date(objRes.LastModified).toISOString() : null,
+          sheets,
+        } };
+      },
     });
+    console.log('[billing-report-file]', JSON.stringify({ source }));
+    return NextResponse.json(body, { status, headers: { 'Cache-Control': 'private, no-store' } });
   } catch (err: any) {
     console.error('report-file error:', err);
     return NextResponse.json({ error: err.message || 'Failed to load file' }, { status: 500 });

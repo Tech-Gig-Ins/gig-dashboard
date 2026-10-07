@@ -16,6 +16,7 @@ import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/clien
 import ExcelJS from 'exceljs';
 
 import { requireAuth } from '@/lib/auth';
+import { cachedJson } from '@/lib/responseCache';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 
@@ -343,45 +344,55 @@ export async function GET(req: NextRequest) {
     }
 
     const outPrefix = `consultant-outputs/${prefix}/`;
-    const reportKey = await findFileInPrefix(outPrefix, /GWU_Consultant_Report/i);
-    const directoryKey = await findFileInPrefix(outPrefix, /consultant_directory/i);
+    // Cached by the ETags of everything in this month's output folder, so a
+    // regenerated report is picked up at once. compute() is the original code.
+    const { status, body, source } = await cachedJson({
+      name: 'consultant-report', version: 'v1', params: month,
+      prefixes: [outPrefix], persist: true,
+      compute: async () => {
+        const reportKey = await findFileInPrefix(outPrefix, /GWU_Consultant_Report/i);
+        const directoryKey = await findFileInPrefix(outPrefix, /consultant_directory/i);
 
-    if (!reportKey && !directoryKey) {
-      return NextResponse.json({
-        month,
-        monthPrefix: prefix,
-        report: null,
-        directory: null,
-        message: `No generated report found for ${month}. Upload the 10 source files and click Generate.`,
-      });
-    }
+        if (!reportKey && !directoryKey) {
+          return { status: 200, body: {
+            month,
+            monthPrefix: prefix,
+            report: null,
+            directory: null,
+            message: `No generated report found for ${month}. Upload the 10 source files and click Generate.`,
+          } };
+        }
 
-    const [reportData, directoryData] = await Promise.all([
-      reportKey ? loadFileFromS3(reportKey) : Promise.resolve(null),
-      directoryKey ? loadFileFromS3(directoryKey) : Promise.resolve(null),
-    ]);
+        const [reportData, directoryData] = await Promise.all([
+          reportKey ? loadFileFromS3(reportKey) : Promise.resolve(null),
+          directoryKey ? loadFileFromS3(directoryKey) : Promise.resolve(null),
+        ]);
 
-    const [reportSheets, directorySheets] = await Promise.all([
-      reportData ? parseWorkbookBuffer(reportData.buffer) : Promise.resolve([]),
-      directoryData ? parseWorkbookBuffer(directoryData.buffer) : Promise.resolve([]),
-    ]);
+        const [reportSheets, directorySheets] = await Promise.all([
+          reportData ? parseWorkbookBuffer(reportData.buffer) : Promise.resolve([]),
+          directoryData ? parseWorkbookBuffer(directoryData.buffer) : Promise.resolve([]),
+        ]);
 
-    return NextResponse.json({
-      month,
-      monthPrefix: prefix,
-      report: reportData ? {
-        s3Key: reportKey!,
-        filename: reportData.filename,
-        lastModified: reportData.lastModified,
-        sheets: reportSheets,
-      } : null,
-      directory: directoryData ? {
-        s3Key: directoryKey!,
-        filename: directoryData.filename,
-        lastModified: directoryData.lastModified,
-        sheets: directorySheets,
-      } : null,
+        return { status: 200, body: {
+          month,
+          monthPrefix: prefix,
+          report: reportData ? {
+            s3Key: reportKey!,
+            filename: reportData.filename,
+            lastModified: reportData.lastModified,
+            sheets: reportSheets,
+          } : null,
+          directory: directoryData ? {
+            s3Key: directoryKey!,
+            filename: directoryData.filename,
+            lastModified: directoryData.lastModified,
+            sheets: directorySheets,
+          } : null,
+        } };
+      },
     });
+    console.log('[consultant-report]', JSON.stringify({ source }));
+    return NextResponse.json(body, { status, headers: { 'Cache-Control': 'private, no-store' } });
   } catch (err: any) {
     console.error('consultant/report error:', err);
     return NextResponse.json({ error: err.message || 'Failed to load consultant report' }, { status: 500 });

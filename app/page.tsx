@@ -17,6 +17,21 @@ function normalizeGroupName(s: string): string {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Memory-only cache of responses already shown in this browser tab, so a
+// month you have already viewed reappears instantly while a fresh copy loads.
+// Never written to disk or browser storage. It disappears on reload, and
+// logout and View as both reload the page, so it never crosses identities.
+const SESSION_CACHE = new Map<string, any>();
+const SESSION_CACHE_MAX = 30;
+function sessionGet(url: string): any | undefined {
+  return SESSION_CACHE.get(url);
+}
+function sessionPut(url: string, data: any) {
+  SESSION_CACHE.delete(url);
+  SESSION_CACHE.set(url, data);
+  while (SESSION_CACHE.size > SESSION_CACHE_MAX) SESSION_CACHE.delete(SESSION_CACHE.keys().next().value as string);
+}
+
 function getConsultantForGroup(group: string): string {
   if (!group || group === '-') return '-';
   const norm = normalizeGroupName(group);
@@ -1037,13 +1052,17 @@ export default function Dashboard() {
 
   async function loadWelfare(month: string) {
     if (!month) return;
-    setWelfareLoading(true);
+    const url = `/api/welfare?month=${encodeURIComponent(month)}`;
+    const cached = sessionGet(url);
+    if (cached) setWelfareData(cached); // shown at once; refreshed below
+    setWelfareLoading(!cached);
     setWelfareError(null);
     try {
-      const res = await fetch(`/api/welfare?month=${encodeURIComponent(month)}`);
+      const res = await fetch(url);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Failed (${res.status})`);
       setWelfareData(data);
+      sessionPut(url, data);
     } catch (e: any) {
       setWelfareError(e.message || 'Failed to load');
       setWelfareData(null);
@@ -1501,28 +1520,9 @@ export default function Dashboard() {
     setSearchQuery(q);
   }
 
-  // Full master data, for the Consultant tab only (its top table shows Active
-  // Members enriched with a Consultant column). The Master tab uses the summary
-  // and server-side pages instead.
-  useEffect(() => {
-    if (activeTab !== 'consultant') return;
-    if (masterData !== null) return;
-    setMasterLoading(true);
-    setMasterError(null);
-    fetch('/api/master')
-      .then((res) => {
-        if (!res.ok) throw new Error(`Master API failed: ${res.status}`);
-        return res.json();
-      })
-      .then((data: MasterData) => {
-        setMasterData(data);
-        setMasterLoading(false);
-      })
-      .catch((e: any) => {
-        setMasterError(e.message || 'Failed to load master data');
-        setMasterLoading(false);
-      });
-  }, [activeTab, masterData]);
+  // The full member list is no longer loaded in the browser. The Consultant
+  // tab used to fetch it, but nothing on that tab displays it; the Master tab
+  // uses the summary and server-side pages. masterData stays null.
 
   // Filter master rows by name and/or file (from the SEARCH bar)
   function filterMasterRows<T extends { normalizedName: string; file: string }>(rows: T[]): T[] {
@@ -1838,15 +1838,22 @@ export default function Dashboard() {
   // Fetch the generated report + directory for the given month.
   async function fetchConsultantReport(month: string) {
     if (!month) return;
-    setConsultantReportLoading(true);
-    try {
-      const res = await fetch(`/api/consultant/report?month=${encodeURIComponent(month)}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to load report');
-      setConsultantReportView(data);
+    const url = `/api/consultant/report?month=${encodeURIComponent(month)}`;
+    const cached = sessionGet(url);
+    const showSheets = (data: any) => {
       // Default active sheet to first sheet of each viewer
       if (data.report?.sheets?.length > 0) setConsultantActiveReportSheet(data.report.sheets[0].name);
       if (data.directory?.sheets?.length > 0) setConsultantActiveDirectorySheet(data.directory.sheets[0].name);
+    };
+    if (cached) { setConsultantReportView(cached); showSheets(cached); } // shown at once; refreshed below
+    setConsultantReportLoading(!cached);
+    try {
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load report');
+      setConsultantReportView(data);
+      sessionPut(url, data);
+      if (!cached) showSheets(data); // keep the sheet the user is on if they already saw it
     } catch (e: any) {
       setConsultantOpError(e.message || 'Failed to load report');
       setConsultantReportView(null);
@@ -1927,15 +1934,26 @@ export default function Dashboard() {
     if (!billingSelectedMonth) return;
     // Load the chat updates for the selected month
     loadUpdates();
-    setBillingLoading(true);
+    const billingUrl = `/api/billing/report-file?month=${encodeURIComponent(billingSelectedMonth)}`;
+    const cachedBilling: BillingReport | undefined = sessionGet(billingUrl);
+    if (cachedBilling) {
+      // Shown at once; refreshed below.
+      setBillingReport(cachedBilling);
+      if (cachedBilling.sheets && cachedBilling.sheets.length > 0 &&
+          !cachedBilling.sheets.some(sh => sh.name === billingActiveSheet)) {
+        setBillingActiveSheet(cachedBilling.sheets[0].name);
+      }
+    }
+    setBillingLoading(!cachedBilling);
     setBillingError(null);
-    fetch(`/api/billing/report-file?month=${encodeURIComponent(billingSelectedMonth)}`)
+    fetch(billingUrl)
       .then(res => {
         if (!res.ok) throw new Error(`Load failed: ${res.status}`);
         return res.json();
       })
       .then((data: BillingReport) => {
         setBillingReport(data);
+        sessionPut(billingUrl, data);
         // Default to the first sheet if the previously selected one no longer exists
         if (data.sheets && data.sheets.length > 0) {
           const hasCurrent = data.sheets.some(s => s.name === billingActiveSheet);

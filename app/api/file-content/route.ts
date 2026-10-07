@@ -252,7 +252,7 @@ export async function GET(request: Request) {
     const head = await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
     const etag = String(head.ETag || '').replace(/"/g, '');
     const httpEtag = `"fc-${PREVIEW_VERSION}-${etag}"`;
-    const cacheHeaders = { 'Cache-Control': 'private, no-cache', ETag: httpEtag };
+    const cacheHeaders = { 'Cache-Control': 'private, no-store', ETag: httpEtag };
 
     if (etag) {
       if (request.headers.get('if-none-match') === httpEtag) {
@@ -278,7 +278,7 @@ export async function GET(request: Request) {
     // replaced between the HEAD and the download is never mislabelled.
     const downloadedEtag = String(res.ETag || '').replace(/"/g, '');
     if (downloadedEtag) await writePreviewCache(key, downloadedEtag, body);
-    const headers = downloadedEtag === etag ? cacheHeaders : { 'Cache-Control': 'private, no-cache' };
+    const headers = downloadedEtag === etag ? cacheHeaders : { 'Cache-Control': 'private, no-store' };
     return NextResponse.json(body, { headers });
   } catch (err: any) {
     console.error('File content error:', err);
