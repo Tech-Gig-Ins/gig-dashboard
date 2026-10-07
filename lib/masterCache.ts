@@ -14,7 +14,7 @@
 // Queries for a table page name the fingerprint they were built from, so a
 // page is always cut from the same result its summary came from.
 
-import { S3Client, ListObjectsV2Command, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, ListObjectsV2Command, GetObjectCommand, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { gzipSync, gunzipSync } from 'zlib';
 import { createHash } from 'crypto';
 import {
@@ -25,10 +25,12 @@ import {
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 const s3 = new S3Client({
   region: process.env.MY_AWS_REGION || 'us-east-1',
-  credentials: {
-    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID!,
+  // The website passes its access keys. The search-indexer Lambda has none
+  // set and uses its own IAM role instead.
+  credentials: process.env.MY_AWS_ACCESS_KEY_ID ? {
+    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY!,
-  },
+  } : undefined,
 });
 
 const VERSION = 'v1';
@@ -160,6 +162,22 @@ export async function getMasterByFingerprint(fp: string): Promise<MasterResponse
   const r: MasterResponse = JSON.parse(saved.toString('utf8'));
   rememberResult(fp, r);
   return r;
+}
+
+/**
+ * Used by the search-indexer Lambda after an upload or include toggle: makes
+ * sure the Master result for the current files exists in S3, building it if
+ * not, so the next person to open Master does not wait for the build.
+ */
+export async function warmMaster(): Promise<{ fingerprint: string; action: 'exists' | 'built'; ms: number }> {
+  const t0 = Date.now();
+  const { fingerprint } = await currentState();
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: `${PREFIX}/result/${fingerprint}.json.gz` }));
+    return { fingerprint, action: 'exists', ms: Date.now() - t0 };
+  } catch { /* not saved yet */ }
+  await getMaster();
+  return { fingerprint, action: 'built', ms: Date.now() - t0 };
 }
 
 /** The current Master result and its fingerprint. Rebuilt only when inputs changed. */

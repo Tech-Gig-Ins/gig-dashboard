@@ -24,7 +24,7 @@
 //
 // Nothing here writes or deletes outside cache/.
 
-import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { gzipSync, gunzipSync } from 'zlib';
 import { createHash } from 'crypto';
 import {
@@ -35,10 +35,12 @@ import {
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 const s3 = new S3Client({
   region: process.env.MY_AWS_REGION || 'us-east-1',
-  credentials: {
-    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID!,
+  // The website passes its access keys. The search-indexer Lambda has none
+  // set and uses its own IAM role instead.
+  credentials: process.env.MY_AWS_ACCESS_KEY_ID ? {
+    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY!,
-  },
+  } : undefined,
 });
 
 // Bump when the index format or parsing changes, so old cache entries are ignored.
@@ -79,6 +81,11 @@ async function cachePut(key: string, body: Buffer): Promise<void> {
     // it just rebuilds instead of reusing the saved copy.
     console.warn('[search-index] cache write failed:', err?.name, err?.message);
   }
+}
+
+async function cacheExists(key: string): Promise<boolean> {
+  try { await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key })); return true; }
+  catch { return false; }
 }
 
 const sha1 = (s: string) => createHash('sha1').update(s).digest('hex');
@@ -310,6 +317,7 @@ function deserializeIndex(buf: Buffer): SearchIndex {
 
 let current: SearchIndex | null = null;
 let building: { fingerprint: string; promise: Promise<SearchIndex> } | null = null;
+let lastSource = '';
 
 async function getIndex(): Promise<{ index: SearchIndex; source: string }> {
   const listed = await getListing();
@@ -321,11 +329,12 @@ async function getIndex(): Promise<{ index: SearchIndex; source: string }> {
       const key = `${CACHE_PREFIX}/index/${fingerprint}.bin.gz`;
       const saved = await cacheGet(key);
       if (saved) {
-        try { return deserializeIndex(saved); }
+        try { const ix = deserializeIndex(saved); lastSource = 's3'; return ix; }
         catch (err) { console.warn('[search-index] saved index unreadable, rebuilding:', err); }
       }
       const built = await buildIndex(listed, fingerprint);
       await cachePut(key, serializeIndex(built));
+      lastSource = 'built';
       return built;
     })();
     building = { fingerprint, promise };
@@ -336,7 +345,7 @@ async function getIndex(): Promise<{ index: SearchIndex; source: string }> {
   const index = await building.promise;
   current = index;
   queryCache.clear(); // results from an older index are no longer valid
-  return { index, source: 'built-or-s3' };
+  return { index, source: lastSource || 's3' };
 }
 
 // ---------------------------------------------------------------------------
@@ -457,8 +466,25 @@ function matchRows(ix: SearchIndex, query: string): RowHit[] {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Public entry point
+// 6. Public entry points
 // ---------------------------------------------------------------------------
+
+/**
+ * Used by the search-indexer Lambda after an upload: makes sure the index for
+ * the bucket as it is right now exists in S3, building it if not. The website
+ * computes the same fingerprint, so it simply loads this saved index.
+ */
+export async function warmSearchIndex(): Promise<{ fingerprint: string; action: 'exists' | 'built'; ms: number }> {
+  const t0 = Date.now();
+  listing = null; // always list fresh here; the 60 s cache is for the website
+  const listed = await getListing();
+  const fingerprint = fingerprintOf(listed);
+  const key = `${CACHE_PREFIX}/index/${fingerprint}.bin.gz`;
+  if (await cacheExists(key)) return { fingerprint, action: 'exists', ms: Date.now() - t0 };
+  const built = await buildIndex(listed, fingerprint);
+  await cachePut(key, serializeIndex(built));
+  return { fingerprint, action: 'built', ms: Date.now() - t0 };
+}
 
 const queryCache = new Map<string, SearchResponse>();
 

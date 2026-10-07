@@ -36,10 +36,12 @@ const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 
 const s3 = new S3Client({
   region: REGION,
-  credentials: {
-    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID!,
+  // The website passes its access keys. The search-indexer Lambda has none
+  // set and uses its own IAM role instead.
+  credentials: process.env.MY_AWS_ACCESS_KEY_ID ? {
+    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY!,
-  },
+  } : undefined,
 });
 
 // ========== Date detection ==========
