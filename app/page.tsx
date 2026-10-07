@@ -92,6 +92,17 @@ type MasterData = {
   previousMonthMissingFiles: string[];
   fileTimelines: FileTimeline[];
 };
+// Master tab: everything except the member lists, from /api/master?view=summary.
+type MasterSummary = Omit<MasterData, 'activeMembers' | 'terminatedMembers' | 'newMembers'> & {
+  activeCount: number;
+  terminatedCount: number;
+  newCount: number;
+  fingerprint: string;
+  fileOptions: string[];
+  sourceSystemOptions: string[];
+};
+// One page of one Master table, from /api/master/query.
+type MasterPage<T> = { rows: T[]; matched: number; total: number; page: number; pageSize: number };
 
 
 // US dollars, two decimals, negatives in parentheses as finance expects.
@@ -550,6 +561,7 @@ export default function Dashboard() {
       setManifestMonthsLoaded(new Set());
       setIncludedByMonth({});
       setMasterData(null);
+      setMasterSummary(null);
       await loadAllFilesData();
     } catch (e: any) {
       setMoveError(e.message || 'Move failed');
@@ -622,6 +634,129 @@ export default function Dashboard() {
   const [activeSorting, setActiveSorting] = useState(false);
   const [terminatedSorting, setTerminatedSorting] = useState(false);
   const [newSorting, setNewSorting] = useState(false);
+
+  // ===== Master tab: search, filters, sorting and paging run on the server =====
+  // The browser only holds the summary (months, missing files, filter options)
+  // and one page of each table. See app/api/master/query/route.ts.
+  const MASTER_PAGE_SIZE = 100;
+  type MasterTableKey = 'active' | 'terminated' | 'new';
+  const [masterSummary, setMasterSummary] = useState<MasterSummary | null>(null);
+  const [masterSummaryLoading, setMasterSummaryLoading] = useState(false);
+  const [masterSummaryError, setMasterSummaryError] = useState<string | null>(null);
+  const [masterPages, setMasterPages] = useState<{
+    active: MasterPage<ActiveRow> | null;
+    terminated: MasterPage<TerminatedRow> | null;
+    new: MasterPage<NewRow> | null;
+  }>({ active: null, terminated: null, new: null });
+  const [masterPageNum, setMasterPageNum] = useState<Record<MasterTableKey, number>>({ active: 1, terminated: 1, new: 1 });
+  const [masterTableLoading, setMasterTableLoading] = useState<Record<MasterTableKey, boolean>>({ active: false, terminated: false, new: false });
+
+  // Summary: loaded when the Master tab opens, and again after any upload,
+  // move or include toggle (those set it back to null).
+  useEffect(() => {
+    if (activeTab !== 'master' || masterSummary !== null) return;
+    let cancelled = false;
+    setMasterSummaryLoading(true);
+    setMasterSummaryError(null);
+    fetch('/api/master?view=summary')
+      .then((res) => {
+        if (!res.ok) throw new Error(`Master API failed: ${res.status}`);
+        return res.json();
+      })
+      .then((d: MasterSummary) => {
+        if (cancelled) return;
+        setMasterSummary(d);
+        setMasterSummaryLoading(false);
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        setMasterSummaryError(e.message || 'Failed to load master data');
+        setMasterSummaryLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, masterSummary]);
+
+  // One table page. The fingerprint ties the page to the summary's data; a 409
+  // means that version expired, so the summary is reloaded.
+  function loadMasterTable(table: MasterTableKey, sort: SortState, page: number, signal: AbortSignal) {
+    if (!masterSummary) return;
+    setMasterTableLoading(prev => ({ ...prev, [table]: true }));
+    fetch('/api/master/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fp: masterSummary.fingerprint, table, search: masterSearch,
+        filters: appliedFilters, sort, page, pageSize: MASTER_PAGE_SIZE,
+      }),
+      signal,
+    })
+      .then((res) => {
+        if (res.status === 409) { setMasterSummary(null); return null; }
+        if (!res.ok) throw new Error(`Master query failed: ${res.status}`);
+        return res.json();
+      })
+      .then((p) => {
+        if (p) setMasterPages(prev => ({ ...prev, [table]: p }));
+        setMasterTableLoading(prev => ({ ...prev, [table]: false }));
+      })
+      .catch((e: any) => {
+        if (e?.name === 'AbortError') return; // a newer request replaced this one
+        setMasterSummaryError(e.message || 'Failed to load master table');
+        setMasterTableLoading(prev => ({ ...prev, [table]: false }));
+      });
+  }
+
+  // A new search or filter starts every table at page 1; a new sort resets its own table.
+  useEffect(() => {
+    setMasterPageNum(p => (p.active === 1 && p.terminated === 1 && p.new === 1) ? p : { active: 1, terminated: 1, new: 1 });
+  }, [masterSearch, appliedFilters]);
+  useEffect(() => { setMasterPageNum(p => p.active === 1 ? p : { ...p, active: 1 }); }, [activeSort]);
+  useEffect(() => { setMasterPageNum(p => p.terminated === 1 ? p : { ...p, terminated: 1 }); }, [terminatedSort]);
+  useEffect(() => { setMasterPageNum(p => p.new === 1 ? p : { ...p, new: 1 }); }, [newSort]);
+
+  // Each table refetches only when something affecting it changes. Typing in
+  // the search or filter boxes changes nothing here until Search or Apply.
+  useEffect(() => {
+    if (activeTab !== 'master' || !masterSummary) return;
+    const c = new AbortController();
+    loadMasterTable('active', activeSort, masterPageNum.active, c.signal);
+    return () => c.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, masterSummary, masterSearch, appliedFilters, activeSort, masterPageNum.active]);
+  useEffect(() => {
+    if (activeTab !== 'master' || !masterSummary) return;
+    const c = new AbortController();
+    loadMasterTable('terminated', terminatedSort, masterPageNum.terminated, c.signal);
+    return () => c.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, masterSummary, masterSearch, appliedFilters, terminatedSort, masterPageNum.terminated]);
+  useEffect(() => {
+    if (activeTab !== 'master' || !masterSummary) return;
+    const c = new AbortController();
+    loadMasterTable('new', newSort, masterPageNum.new, c.signal);
+    return () => c.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, masterSummary, masterSearch, appliedFilters, newSort, masterPageNum.new]);
+
+  function renderMasterPager(table: MasterTableKey) {
+    const p = masterPages[table];
+    if (!p || p.matched <= p.pageSize) return null;
+    const pages = Math.ceil(p.matched / p.pageSize);
+    const from = (p.page - 1) * p.pageSize + 1;
+    const to = Math.min(p.page * p.pageSize, p.matched);
+    const go = (n: number) => setMasterPageNum(prev => ({ ...prev, [table]: Math.min(Math.max(1, n), pages) }));
+    return (
+      <div className="master-pager">
+        <button className="master-pager-btn" disabled={p.page <= 1} onClick={() => go(1)}>First</button>
+        <button className="master-pager-btn" disabled={p.page <= 1} onClick={() => go(p.page - 1)}>Previous</button>
+        <span className="master-pager-info">
+          {from.toLocaleString()} to {to.toLocaleString()} of {p.matched.toLocaleString()}
+        </span>
+        <button className="master-pager-btn" disabled={p.page >= pages} onClick={() => go(p.page + 1)}>Next</button>
+        <button className="master-pager-btn" disabled={p.page >= pages} onClick={() => go(pages)}>Last</button>
+      </div>
+    );
+  }
 
   // Consultant tab state
   const [consultantSearchInput, setConsultantSearchInput] = useState('');
@@ -1237,6 +1372,7 @@ export default function Dashboard() {
       }));
       // Master numbers are derived from the manifest, so force a refetch.
       setMasterData(null);
+      setMasterSummary(null);
     } catch (e: any) {
       setIncludeError(e.message || 'Failed to update manifest');
       setIncludedByMonth((prev) => {
@@ -1365,10 +1501,11 @@ export default function Dashboard() {
     setSearchQuery(q);
   }
 
-  // Master data lazy load when master OR consultant tab becomes active
-  // (Consultant tab's top table shows Active Members enriched with a Consultant column.)
+  // Full master data, for the Consultant tab only (its top table shows Active
+  // Members enriched with a Consultant column). The Master tab uses the summary
+  // and server-side pages instead.
   useEffect(() => {
-    if (activeTab !== 'master' && activeTab !== 'consultant') return;
+    if (activeTab !== 'consultant') return;
     if (masterData !== null) return;
     setMasterLoading(true);
     setMasterError(null);
@@ -1624,8 +1761,8 @@ export default function Dashboard() {
     for (const r of data.newMembers) if (r[key]) set.add(r[key]);
     return Array.from(set).sort();
   }
-  const fileOptions = uniqueValues(masterData, 'file');
-  const sourceSystemOptions = uniqueValues(masterData, 'sourceSystem');
+  const fileOptions = masterSummary ? masterSummary.fileOptions : uniqueValues(masterData, 'file');
+  const sourceSystemOptions = masterSummary ? masterSummary.sourceSystemOptions : uniqueValues(masterData, 'sourceSystem');
 
   // US states
   const US_STATES = ['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY'];
@@ -2302,6 +2439,7 @@ export default function Dashboard() {
     if (uploadedAny) {
       loadAllFilesData();
       setMasterData(null);
+      setMasterSummary(null);
     }
   }
   function handleRowFileChange(label: string, file: File | null) {
@@ -2761,6 +2899,11 @@ export default function Dashboard() {
         .master-section-heading { font-family: 'Fraunces', serif; font-size: 32px; font-weight: 500; color: #ffffff; margin: 0 0 20px; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 20px; }
         .master-section-heading::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(107, 164, 255, 0.4) 0%, transparent 100%); }
         .master-section-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); font-weight: 500; }
+        .master-pager { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+        .master-pager-btn { font-family: 'Inter', sans-serif; font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(107,164,255,0.35); background: rgba(107,164,255,0.08); color: rgba(255,255,255,0.85); cursor: pointer; }
+        .master-pager-btn:hover:not(:disabled) { background: rgba(107,164,255,0.18); }
+        .master-pager-btn:disabled { opacity: 0.35; cursor: default; }
+        .master-pager-info { font-size: 12px; color: rgba(255,255,255,0.6); padding: 0 8px; }
         .master-meta-row { font-size: 12px; letter-spacing: 0.1em; color: rgba(255, 255, 255, 0.4); margin-bottom: 16px; }
 
         .master-missing-files { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; padding: 12px 16px; margin: 0 0 16px; background: rgba(255, 165, 0, 0.06); border: 1px solid rgba(255, 165, 0, 0.25); border-left: 3px solid rgba(255, 165, 0, 0.7); border-radius: 8px; font-size: 13px; color: rgba(255, 220, 180, 0.9); }
@@ -3616,28 +3759,28 @@ export default function Dashboard() {
             </div>
 
             <div className="master-dashboard">
-              {masterLoading && <div className="loading-state">Loading master data, this may take 10-30 seconds...</div>}
-              {masterError && <div className="error-state">Error: {masterError}</div>}
-              {!masterLoading && !masterError && masterData && (
+              {masterSummaryLoading && <div className="loading-state">Loading master data...</div>}
+              {masterSummaryError && <div className="error-state">Error: {masterSummaryError}</div>}
+              {!masterSummaryLoading && !masterSummaryError && masterSummary && (
                 <>
                   <div className="master-meta-row">
-                    <span>Months processed: {masterData.monthsProcessed.join(' · ')}</span>
+                    <span>Months processed: {masterSummary.monthsProcessed.join(' · ')}</span>
                   </div>
 
                   {/* ACTIVE MEMBERS */}
                   <div className="master-section">
                     <h2 className="master-section-heading">
                       Active Members
-                      <span className="master-section-count">{fullyFilter(masterData.activeMembers, false, false).length} of {masterData.activeMembers.length}</span>
+                      <span className="master-section-count">{masterPages.active ? masterPages.active.matched.toLocaleString() : '...'} of {masterSummary.activeCount.toLocaleString()}</span>
                     </h2>
-                    {masterData.latestMonthLabel && (
-                      masterData.latestMonthMissingFiles.length > 0 ? (
+                    {masterSummary.latestMonthLabel && (
+                      masterSummary.latestMonthMissingFiles.length > 0 ? (
                         <div className="file-timelines">
                           <div className="file-timelines-heading">
-                            Files missing in {masterData.latestMonthLabel} (active data falls back to their last available month):
+                            Files missing in {masterSummary.latestMonthLabel} (active data falls back to their last available month):
                           </div>
-                          {masterData.fileTimelines
-                            .filter(t => masterData.latestMonthMissingFiles.includes(t.file))
+                          {masterSummary.fileTimelines
+                            .filter(t => masterSummary.latestMonthMissingFiles.includes(t.file))
                             .map(t => (
                               <div key={t.file} className="file-timeline-row">
                                 <div className="file-timeline-header">
@@ -3662,15 +3805,15 @@ export default function Dashboard() {
                         </div>
                       ) : (
                         <div className="master-missing-files master-missing-files-none">
-                          All {masterData.fileTimelines.length} files present for {masterData.latestMonthLabel}.
+                          All {masterSummary.fileTimelines.length} files present for {masterSummary.latestMonthLabel}.
                         </div>
                       )
                     )}
-                    {fullyFilter(masterData.activeMembers, false, false).length === 0 ? (
+                    {masterPages.active && masterPages.active.matched === 0 ? (
                       <div className="empty-state">No active members match the filter.</div>
                     ) : (
                       <div className="sortable-outer">
-                        {activeSorting && (
+                        {(activeSorting || masterTableLoading.active) && (
                           <div className="sort-spinner-overlay">
                             <div className="sort-spinner" />
                             <div className="sort-spinner-label">Sorting...</div>
@@ -3691,12 +3834,13 @@ export default function Dashboard() {
                             ))}</tr>
                           </thead>
                           <tbody>
-                            {sortRows(fullyFilter(masterData.activeMembers, false, false), activeSort).map((row, i) => (
+                            {(masterPages.active ? masterPages.active.rows : []).map((row, i) => (
                               <tr key={i}>{renderMasterTableCells(row, activeColumns)}</tr>
                             ))}
                           </tbody>
                         </table>
                         </div>
+                        {renderMasterPager('active')}
                       </div>
                     )}
                   </div>
@@ -3705,16 +3849,16 @@ export default function Dashboard() {
                   <div className="master-section">
                     <h2 className="master-section-heading">
                       Terminated Members
-                      <span className="master-section-count">{fullyFilter(masterData.terminatedMembers, true, false).length} of {masterData.terminatedMembers.length}</span>
+                      <span className="master-section-count">{masterPages.terminated ? masterPages.terminated.matched.toLocaleString() : '...'} of {masterSummary.terminatedCount.toLocaleString()}</span>
                     </h2>
-                    {masterData.latestMonthLabel && (
-                      masterData.latestMonthMissingFiles.length > 0 ? (
+                    {masterSummary.latestMonthLabel && (
+                      masterSummary.latestMonthMissingFiles.length > 0 ? (
                         <div className="file-timelines">
                           <div className="file-timelines-heading">
-                            Files missing in {masterData.latestMonthLabel}:
+                            Files missing in {masterSummary.latestMonthLabel}:
                           </div>
-                          {masterData.fileTimelines
-                            .filter(t => masterData.latestMonthMissingFiles.includes(t.file))
+                          {masterSummary.fileTimelines
+                            .filter(t => masterSummary.latestMonthMissingFiles.includes(t.file))
                             .map(t => (
                               <div key={t.file} className="file-timeline-row">
                                 <div className="file-timeline-header">
@@ -3739,15 +3883,15 @@ export default function Dashboard() {
                         </div>
                       ) : (
                         <div className="master-missing-files master-missing-files-none">
-                          All {masterData.fileTimelines.length} files present for {masterData.latestMonthLabel}.
+                          All {masterSummary.fileTimelines.length} files present for {masterSummary.latestMonthLabel}.
                         </div>
                       )
                     )}
-                    {fullyFilter(masterData.terminatedMembers, true, false).length === 0 ? (
+                    {masterPages.terminated && masterPages.terminated.matched === 0 ? (
                       <div className="empty-state">No terminated members match the filter.</div>
                     ) : (
                       <div className="sortable-outer">
-                        {terminatedSorting && (
+                        {(terminatedSorting || masterTableLoading.terminated) && (
                           <div className="sort-spinner-overlay">
                             <div className="sort-spinner" />
                             <div className="sort-spinner-label">Sorting...</div>
@@ -3768,12 +3912,13 @@ export default function Dashboard() {
                             ))}</tr>
                           </thead>
                           <tbody>
-                            {sortRows(fullyFilter(masterData.terminatedMembers, true, false), terminatedSort).map((row, i) => (
+                            {(masterPages.terminated ? masterPages.terminated.rows : []).map((row, i) => (
                               <tr key={i}>{renderMasterTableCells(row, terminatedColumns)}</tr>
                             ))}
                           </tbody>
                         </table>
                         </div>
+                        {renderMasterPager('terminated')}
                       </div>
                     )}
                   </div>
@@ -3782,16 +3927,16 @@ export default function Dashboard() {
                   <div className="master-section">
                     <h2 className="master-section-heading">
                       New Members
-                      <span className="master-section-count">{fullyFilter(masterData.newMembers, false, true).length} of {masterData.newMembers.length}</span>
+                      <span className="master-section-count">{masterPages.new ? masterPages.new.matched.toLocaleString() : '...'} of {masterSummary.newCount.toLocaleString()}</span>
                     </h2>
-                    {masterData.latestMonthLabel && (
-                      masterData.latestMonthMissingFiles.length > 0 ? (
+                    {masterSummary.latestMonthLabel && (
+                      masterSummary.latestMonthMissingFiles.length > 0 ? (
                         <div className="file-timelines">
                           <div className="file-timelines-heading">
-                            Files missing in {masterData.latestMonthLabel}:
+                            Files missing in {masterSummary.latestMonthLabel}:
                           </div>
-                          {masterData.fileTimelines
-                            .filter(t => masterData.latestMonthMissingFiles.includes(t.file))
+                          {masterSummary.fileTimelines
+                            .filter(t => masterSummary.latestMonthMissingFiles.includes(t.file))
                             .map(t => (
                               <div key={t.file} className="file-timeline-row">
                                 <div className="file-timeline-header">
@@ -3816,15 +3961,15 @@ export default function Dashboard() {
                         </div>
                       ) : (
                         <div className="master-missing-files master-missing-files-none">
-                          All {masterData.fileTimelines.length} files present for {masterData.latestMonthLabel}.
+                          All {masterSummary.fileTimelines.length} files present for {masterSummary.latestMonthLabel}.
                         </div>
                       )
                     )}
-                    {fullyFilter(masterData.newMembers, false, true).length === 0 ? (
+                    {masterPages.new && masterPages.new.matched === 0 ? (
                       <div className="empty-state">No new members match the filter.</div>
                     ) : (
                       <div className="sortable-outer">
-                        {newSorting && (
+                        {(newSorting || masterTableLoading.new) && (
                           <div className="sort-spinner-overlay">
                             <div className="sort-spinner" />
                             <div className="sort-spinner-label">Sorting...</div>
@@ -3845,12 +3990,13 @@ export default function Dashboard() {
                             ))}</tr>
                           </thead>
                           <tbody>
-                            {sortRows(fullyFilter(masterData.newMembers, false, true), newSort).map((row, i) => (
+                            {(masterPages.new ? masterPages.new.rows : []).map((row, i) => (
                               <tr key={i}>{renderMasterTableCells(row, newColumns)}</tr>
                             ))}
                           </tbody>
                         </table>
                         </div>
+                        {renderMasterPager('new')}
                       </div>
                     )}
                   </div>
