@@ -33,6 +33,13 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Missing key parameter' }, { status: 400 });
   }
 
+  // PDF and ZIP files are on the Unclassified Files page, which only Admin
+  // can see. Refuse them for everyone else here too.
+  const lowerKey = key.toLowerCase();
+  if ((lowerKey.endsWith('.pdf') || lowerKey.endsWith('.zip')) && !gate.isAdmin) {
+    return NextResponse.json({ error: 'Not available to your role' }, { status: 403 });
+  }
+
   try {
     const filename = key.split('/').pop() || 'download';
 

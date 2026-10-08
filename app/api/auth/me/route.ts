@@ -9,6 +9,38 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { recordActivity } from '@/lib/activity';
+import { CognitoIdentityProviderClient, ListUsersCommand } from '@aws-sdk/client-cognito-identity-provider';
+
+const cognito = new CognitoIdentityProviderClient({
+  region: process.env.MY_AWS_REGION || 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY!,
+  },
+});
+const nameCache = new Map<string, { name: string; at: number }>();
+
+// While viewing as someone, the session only knows their email. Look up their
+// name in Cognito (cached 10 minutes); fall back to the email.
+async function nameFor(email: string): Promise<string> {
+  const hit = nameCache.get(email);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.name;
+  let name = email;
+  try {
+    const res = await cognito.send(new ListUsersCommand({
+      UserPoolId: process.env.COGNITO_USER_POOL_ID!,
+      Filter: `email = "${email.replace(/"/g, '')}"`,
+      Limit: 1,
+    }));
+    const attrs = res.Users?.[0]?.Attributes || [];
+    const get = (n: string) => String(attrs.find(a => a.Name === n)?.Value || '').trim();
+    name = [get('given_name'), get('family_name')].filter(Boolean).join(' ') || email;
+  } catch (err: any) {
+    console.warn('[auth/me] name lookup failed:', err?.name);
+  }
+  nameCache.set(email, { name, at: Date.now() });
+  return name;
+}
 
 export async function GET(req: NextRequest) {
   const session = await getSession(req);
@@ -24,7 +56,7 @@ export async function GET(req: NextRequest) {
     email: session.email,
     firstName: session.firstName,
     lastName: session.lastName,
-    fullName: session.fullName,
+    fullName: session.isImpersonating ? await nameFor(session.email) : session.fullName,
     isAdmin: session.isAdmin,
     // Full technical access, but the Welfare tab still needs an admin's
     // time-boxed grant. Without this field the UI treats the user as a

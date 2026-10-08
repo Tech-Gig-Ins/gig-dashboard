@@ -45,7 +45,9 @@ function readCookie(req: AnyRequest, name: string): string | undefined {
 export const ID_COOKIE = 'gwu_id';
 export const ACCESS_COOKIE = 'gwu_at';
 export const REFRESH_COOKIE = 'gwu_rt';
-export const IMPERSONATE_COOKIE = 'gwu_imp';
+export const IMPERSONATE_COOKIE = 'gwu_imp'; // legacy: no longer read, only cleared
+/** Sent by a "View as" tab on each request. Per tab, so other tabs are unaffected. */
+export const VIEW_AS_HEADER = 'x-view-as';
 
 const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID!;
 const CLIENT_ID = process.env.COGNITO_CLIENT_ID!;
@@ -148,14 +150,16 @@ export async function getSession(req: AnyRequest): Promise<Session | null> {
     // ---- Impersonation (testing aid) --------------------------------------
     //
     // A platform admin or admin can act as another account so roles can be
-    // checked without juggling logins. The cookie is set only by
-    // /api/impersonate, which verifies the real session first.
+    // checked without juggling logins. The target arrives in the x-view-as
+    // header, which only a "View as" browser tab sends, so other tabs keep the
+    // real identity. It is honoured only when the REAL signed-in account is an
+    // admin or platform admin, so sending the header by hand achieves nothing.
     //
     // This is NOT a security boundary: anyone who can impersonate an admin can
     // do anything that admin can, including granting themselves Welfare. It
     // exists so one person can test every role. Every mutating route logs both
     // identities so the trail still shows who really acted.
-    const impersonating = readCookie(req, IMPERSONATE_COOKIE);
+    const impersonating = req.headers.get(VIEW_AS_HEADER) || '';
     if (impersonating && (real.isAdmin || real.isPlatformAdmin)) {
       const target = impersonating.trim().toLowerCase();
       if (target && target !== real.email && emailDomain(target) === ALLOWED_DOMAIN) {

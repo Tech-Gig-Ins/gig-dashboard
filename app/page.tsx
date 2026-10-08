@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useState, useRef, useMemo, memo } from 'react';
 import { CONSULTANT_ROWS, UNIQUE_CONSULTANTS, REPORT_MONTH, type ConsultantRow } from './data/consultantData';
 import * as XLSX from 'xlsx';
 
@@ -71,7 +71,7 @@ type SearchResponse = {
   results: SearchMatch[];
 };
 
-type TabKey = 'master' | 'all-info' | 'consultant' | 'billing' | 'welfare' | 'users';
+type TabKey = 'master' | 'all-info' | 'unclassified' | 'consultant' | 'consultant-directory' | 'billing' | 'welfare' | 'users' | 'other-apps';
 
 type MemberRecord = {
   memberName: string;
@@ -457,6 +457,145 @@ function highlight(text: string, terms: string[]): React.ReactNode {
   );
 }
 
+// ===== View as, per tab =====
+// A "View as" tab keeps the account it is viewing as in sessionStorage, which
+// belongs to that one tab, and sends it as the x-view-as header on every
+// /api/ request. Other tabs never see it, so you can be yourself in one tab and
+// view as someone else in another. It holds an email and an expiry only.
+const VIEW_AS_KEY = 'gwu-view-as';
+function readViewAs(): { email: string; expiresAt: number } | null {
+  try {
+    const v = JSON.parse(window.sessionStorage.getItem(VIEW_AS_KEY) || 'null');
+    if (v && typeof v.email === 'string' && v.expiresAt > Date.now()) return v;
+    window.sessionStorage.removeItem(VIEW_AS_KEY);
+  } catch { /* storage unavailable */ }
+  return null;
+}
+function clearViewAs() {
+  try { window.sessionStorage.removeItem(VIEW_AS_KEY); } catch { /* ignore */ }
+}
+if (typeof window !== 'undefined' && !(window as any).__gwuViewAs) {
+  (window as any).__gwuViewAs = true;
+  // A new View as tab receives its target in the URL fragment (never sent to
+  // the server), stores it for this tab, then removes it from the address bar.
+  const m = window.location.hash.match(/^#view-as=([^&]+)&exp=(\d+)$/);
+  if (m) {
+    try {
+      window.sessionStorage.setItem(VIEW_AS_KEY, JSON.stringify({ email: decodeURIComponent(m[1]), expiresAt: Number(m[2]) }));
+    } catch { /* ignore */ }
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+  // Installed before React renders, so even the first request carries it.
+  const original = window.fetch.bind(window);
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    const v = readViewAs();
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (!v || !url.includes('/api/')) return original(input, init);
+    const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
+    headers.set('x-view-as', v.email);
+    return original(input, { ...init, headers });
+  };
+}
+
+// ===== Other Apps =====
+// Other apps run by Gig Workers Universe. Each icon is loaded from the app's
+// own site, trying a large icon first, then favicon.ico, then the first letter.
+const OTHER_APPS = [
+  {
+    name: 'Claims Tracker',
+    description: 'Chat interface with Dickinson Group.',
+    url: 'https://claimstracker.gigworkersuniverse.com/',
+  },
+  {
+    name: 'Plans - AI Chatbot',
+    description: 'AI chat to look up information about all the plans we provide.',
+    url: 'https://main.d3iehifcl1udbf.amplifyapp.com/',
+  },
+];
+function AppIcon({ url, name }: { url: string; name: string }) {
+  const origin = new URL(url).origin;
+  const candidates = [`${origin}/apple-touch-icon.png`, `${origin}/icon.png`, `${origin}/favicon.ico`];
+  const [i, setI] = useState(0);
+  if (i >= candidates.length) {
+    return <div className="app-icon app-icon-letter" aria-hidden="true">{name.charAt(0)}</div>;
+  }
+  return (
+    <img className="app-icon" src={candidates[i]} alt="" onError={() => setI(i + 1)} />
+  );
+}
+
+// Sidebar sections. A separate component so opening or closing a section only
+// redraws the sidebar, not the whole dashboard.
+type RailItem = { key: TabKey; label: string; locked: boolean; countdown: string };
+type RailSection = { id: string; label: string; items: RailItem[]; page?: TabKey };
+const SidebarNav = memo(function SidebarNav({ sections, activeTab, onSelect }: {
+  sections: RailSection[];
+  activeTab: TabKey;
+  onSelect: (k: TabKey) => void;
+}) {
+  // Dashboard starts open, because Master is the first page. Whenever the
+  // current page changes, its section opens so the highlight is visible.
+  const [open, setOpen] = useState<Record<string, boolean>>({ dashboard: true });
+  useEffect(() => {
+    const sec = sections.find(sc => sc.items.some(i => i.key === activeTab));
+    if (sec) setOpen(prev => (prev[sec.id] ? prev : { ...prev, [sec.id]: true }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+  return (
+    <div className="rail-nav">
+      {sections.map(sec => {
+        // A section that is a single page (Other Apps) is one direct link.
+        if (sec.page) {
+          return (
+            <div key={sec.id} className="rail-section">
+              <button
+                className={`rail-section-btn rail-section-link ${activeTab === sec.page ? 'holds-active active' : ''}`}
+                onClick={() => onSelect(sec.page!)}
+              >
+                <span>{sec.label}</span>
+              </button>
+            </div>
+          );
+        }
+        const isOpen = !!open[sec.id];
+        const holdsActive = sec.items.some(n => n.key === activeTab);
+        return (
+          <div key={sec.id} className="rail-section">
+            <button
+              className={`rail-section-btn ${holdsActive ? 'holds-active' : ''}`}
+              onClick={() => setOpen(prev => ({ ...prev, [sec.id]: !prev[sec.id] }))}
+              aria-expanded={isOpen}
+            >
+              <span>{sec.label}</span>
+              <span className={`rail-chevron ${isOpen ? 'open' : ''}`} aria-hidden="true">&#9662;</span>
+            </button>
+            <div className={`rail-items ${isOpen ? 'open' : ''}`}>
+              <div className="rail-items-inner">
+                {sec.items.map(n => (
+                  <button
+                    key={n.key}
+                    className={`rail-btn rail-sub ${activeTab === n.key ? 'active' : ''} ${n.locked ? 'locked' : ''}`}
+                    onClick={() => { if (!n.locked) onSelect(n.key); }}
+                    disabled={n.locked}
+                    tabIndex={isOpen ? 0 : -1}
+                    title={n.locked
+                      ? 'Welfare is locked. An administrator must grant you access, for between 1 and 7 days.'
+                      : n.countdown ? `Welfare access expires in ${n.countdown}` : n.label}
+                  >
+                    <span className="rail-btn-label">{n.label}</span>
+                    {n.locked && <span className="rail-lock" aria-label="locked">&#128274;</span>}
+                    {!n.locked && n.countdown && <span className="rail-countdown">{n.countdown}</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
 export default function Dashboard() {
   const [mounted, setMounted] = useState(false);
   // All Info state (list of files)
@@ -468,17 +607,31 @@ export default function Dashboard() {
 
   const [activeTab, setActiveTab] = useState<TabKey>('master');
 
-  // The left rail is the only navigation; the tab bar is gone. Welfare is
-  // admin-only and sits in the same list as the four operational views.
-  const NAV_ITEMS: Array<{ key: TabKey; label: string; adminOnly?: boolean }> = [
-    { key: 'master',     label: 'Master Dashboard' },
-    { key: 'all-info',   label: 'All Info' },
-    { key: 'consultant', label: 'Consultant Report' },
-    { key: 'billing',    label: 'Billing' },
-    { key: 'welfare',    label: 'Welfare' },
-    // Admin and Platform Admin only. Members never see it in the rail, and
-    // /api/users refuses them server-side anyway.
-    { key: 'users',      label: 'Users', adminOnly: true },
+  // The left rail is the only navigation, grouped into sections that start
+  // closed. "staff" means Admin or Platform Admin. Members never see staff
+  // items, and the server refuses them anyway; hiding is for clarity only.
+  // Welfare is the one exception: a Member with an active grant sees it.
+  type NavItem = { key: TabKey; label: string; staff?: boolean; adminOnly?: boolean };
+  const NAV_SECTIONS: Array<{ id: string; label: string; staff?: boolean; page?: TabKey; items: NavItem[] }> = [
+    { id: 'dashboard', label: 'Dashboard', items: [
+      { key: 'master',       label: 'Master' },
+      { key: 'all-info',     label: 'All Records' },
+      { key: 'unclassified', label: 'Unclassified Files', adminOnly: true },
+    ] },
+    { id: 'consultant', label: 'Consultant Report', items: [
+      { key: 'consultant',           label: 'Monthly' },
+      { key: 'consultant-directory', label: 'Directory' },
+    ] },
+    { id: 'billing', label: 'Billing', items: [
+      { key: 'billing', label: 'CardPointe_Refresh' },
+      { key: 'welfare', label: 'Welfare', staff: true },
+    ] },
+    { id: 'activity', label: 'Activity', staff: true, items: [
+      { key: 'users', label: 'Users' },
+    ] },
+    { id: 'other-apps', label: 'Other Apps', page: 'other-apps', items: [
+      { key: 'other-apps', label: 'Other Apps' },
+    ] },
   ];
 
   // Set true when the deployed build no longer matches the one this tab loaded.
@@ -666,30 +819,6 @@ export default function Dashboard() {
   const [masterPageNum, setMasterPageNum] = useState<Record<MasterTableKey, number>>({ active: 1, terminated: 1, new: 1 });
   const [masterTableLoading, setMasterTableLoading] = useState<Record<MasterTableKey, boolean>>({ active: false, terminated: false, new: false });
 
-  // Summary: loaded when the Master tab opens, and again after any upload,
-  // move or include toggle (those set it back to null).
-  useEffect(() => {
-    if (activeTab !== 'master' || masterSummary !== null) return;
-    let cancelled = false;
-    setMasterSummaryLoading(true);
-    setMasterSummaryError(null);
-    fetch('/api/master?view=summary')
-      .then((res) => {
-        if (!res.ok) throw new Error(`Master API failed: ${res.status}`);
-        return res.json();
-      })
-      .then((d: MasterSummary) => {
-        if (cancelled) return;
-        setMasterSummary(d);
-        setMasterSummaryLoading(false);
-      })
-      .catch((e: any) => {
-        if (cancelled) return;
-        setMasterSummaryError(e.message || 'Failed to load master data');
-        setMasterSummaryLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [activeTab, masterSummary]);
 
   // One table page. The fingerprint ties the page to the summary's data; a 409
   // means that version expired, so the summary is reloaded.
@@ -818,6 +947,36 @@ export default function Dashboard() {
     isImpersonating?: boolean; actualEmail?: string;
   };
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+
+  // (Master summary effect lives here so it can wait for the signed-in user.)
+  // Summary: loaded when the Master tab opens, and again after any upload,
+  // move or include toggle (those set it back to null).
+  useEffect(() => {
+    // Wait until /api/auth/me has confirmed the session (renewing an expired
+    // token if needed). This effect is declared before the fetch wrapper that
+    // retries 401s, so without this the first load of the day failed.
+    if (!authUser?.authenticated) return;
+    if (activeTab !== 'master' || masterSummary !== null) return;
+    let cancelled = false;
+    setMasterSummaryLoading(true);
+    setMasterSummaryError(null);
+    fetch('/api/master?view=summary')
+      .then((res) => {
+        if (!res.ok) throw new Error(`Master API failed: ${res.status}`);
+        return res.json();
+      })
+      .then((d: MasterSummary) => {
+        if (cancelled) return;
+        setMasterSummary(d);
+        setMasterSummaryLoading(false);
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        setMasterSummaryError(e.message || 'Failed to load master data');
+        setMasterSummaryLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeTab, masterSummary, authUser?.authenticated]);
   // Nothing renders until the session is confirmed, so a signed-out visitor
   // never sees dashboard chrome or triggers data fetches.
   const [authChecked, setAuthChecked] = useState(false);
@@ -893,35 +1052,54 @@ export default function Dashboard() {
   const [impBusy, setImpBusy] = useState(false);
   const [impError, setImpError] = useState<string | null>(null);
 
-  async function startImpersonation() {
-    if (!impEmail.trim() || impBusy) return;
+  // Opens View as in a NEW tab; this tab stays as you. The tab is opened
+  // straight away, during the click, so the browser does not block it.
+  async function startImpersonation(emailArg?: string) {
+    const email = (emailArg ?? impEmail).trim();
+    if (!email || impBusy) return;
+    const tab = window.open('', '_blank');
     setImpBusy(true);
     setImpError(null);
     try {
       const res = await fetch('/api/impersonate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: impEmail.trim() }),
+        body: JSON.stringify({ email }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
-      // Full reload: every tab's data was fetched as the previous identity.
-      window.location.reload();
+      const expiresAt = Date.now() + (Number(body.expiresInSeconds) || 3600) * 1000;
+      const url = `${window.location.origin}/#view-as=${encodeURIComponent(email)}&exp=${expiresAt}`;
+      if (tab) tab.location.href = url;
+      else window.location.href = url; // pop-ups blocked: use this tab instead
     } catch (e: any) {
+      if (tab) tab.close();
       setImpError(e.message || 'Could not switch account');
+    } finally {
       setImpBusy(false);
     }
   }
 
+  // Ends View as in this tab: records it, then closes the tab (or, if the
+  // browser will not close it, reloads it as you).
   async function stopImpersonation() {
     setImpBusy(true);
-    try {
-      await fetch('/api/impersonate', { method: 'DELETE' });
-      window.location.reload();
-    } catch {
-      setImpBusy(false);
-    }
+    try { await fetch('/api/impersonate', { method: 'DELETE' }); } catch { /* still exit */ }
+    clearViewAs();
+    window.close();
+    setTimeout(() => window.location.replace('/'), 200);
   }
+
+  // A View as tab ends by itself after an hour, and names itself in the tab title.
+  useEffect(() => {
+    const v = readViewAs();
+    if (!v) return;
+    const t = setTimeout(() => { clearViewAs(); window.location.replace('/'); }, Math.max(0, v.expiresAt - Date.now()));
+    return () => clearTimeout(t);
+  }, []);
+  useEffect(() => {
+    if (authUser?.isImpersonating) document.title = `View as ${authUser.fullName} · GWU Dashboard`;
+  }, [authUser?.isImpersonating, authUser?.fullName]);
 
   // ===== Welfare (NYP wire) tab =====
   type WelfareRow = {
@@ -1096,7 +1274,7 @@ export default function Dashboard() {
     const aoa: any[][] = [
       [`Wire Payments to NY Practice - ${welfareData.month}`],
       [`Remittances: ${welfareData.month}   |   Credits: ${welfareData.creditMonth || ''}`], [],
-      ['Remittances: files Included in All Info for this month.'],
+      ['Remittances: files Included in All Records for this month.'],
       [`Credits: PRIOR month (${welfareData.creditMonth || 'previous month'}), any Include status, .pdf/.zip excluded.`],
       ['Remittance Amount sums every row. Enrolled counts distinct members after de-duplication.'],
       ['Cap Fee = Enrolled x fee rate. Credit Fees = Credit Count x fee rate (raw rows).'],
@@ -1211,9 +1389,11 @@ export default function Dashboard() {
         return res.json();
       })
       .then((data: FileRow[]) => {
-        setGrouped(groupFiles(data));
+        // .pdf and .zip live on the Unclassified Files page, not All Records.
+        const records = data.filter((f) => !isExcludedByExtension(f.filename));
+        setGrouped(groupFiles(records));
         setAllFilesRaw(data);
-        setTotalFiles(data.length);
+        setTotalFiles(records.length);
         setLoading(false);
       })
       .catch((e: any) => {
@@ -1978,14 +2158,14 @@ export default function Dashboard() {
 
   // Load consultant tab data whenever the tab is activated or the month changes.
   useEffect(() => {
-    if (activeTab !== 'consultant') return;
+    if (activeTab !== 'consultant' && activeTab !== 'consultant-directory') return;
     // Always refresh the list of months when the tab becomes active
     fetchConsultantMonths();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
   useEffect(() => {
-    if (activeTab !== 'consultant') return;
+    if (activeTab !== 'consultant' && activeTab !== 'consultant-directory') return;
     if (!consultantSelectedMonth) return;
     // Refresh the manifest for this month even if it was cached from All Info,
     // so the Generate button reflects edits made since the files were listed.
@@ -2208,7 +2388,7 @@ export default function Dashboard() {
 
   // System-first grouping for the All Info browse view. Recomputes only when
   // the flat file list changes.
-  const systemGrouped = useMemo(() => groupFilesBySystem(allFilesRaw), [allFilesRaw]);
+  const systemGrouped = useMemo(() => groupFilesBySystem(allFilesRaw.filter((f) => !isExcludedByExtension(f.filename))), [allFilesRaw]);
 
   // Order sources by canonical carrier priority so the layout is predictable
   // regardless of upload order. Unknown carriers fall to the end alphabetically.
@@ -2740,6 +2920,47 @@ export default function Dashboard() {
           min-width: 140px;
         }
         .cell-consultant-empty { color: rgba(255, 255, 255, 0.3); }
+        /* Sidebar sections. Global because SidebarNav is its own component,
+           and styled-jsx scoped styles only reach elements of this one. */
+        .rail-btn { text-align: left; padding: 11px 14px; border-radius: 10px; background: transparent; border: 1px solid transparent; color: rgba(255,255,255,0.5); font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
+        .rail-btn:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.85); }
+        .rail-btn.active { background: rgba(107,164,255,0.14); border-color: rgba(107,164,255,0.4); color: #ffffff; }
+        .rail-nav { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+        .rail-section { display: flex; flex-direction: column; gap: 2px; }
+        .rail-items { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.18s ease; }
+        .rail-items.open { grid-template-rows: 1fr; }
+        .rail-items-inner { overflow: hidden; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
+        .rail-section-btn { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border: none; border-radius: 8px; background: transparent; color: rgba(255,255,255,0.55); font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; }
+        .rail-section-btn:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.85); }
+        .rail-section-btn.holds-active { color: #ffffff; }
+        .rail-chevron { font-size: 10px; transform: rotate(-90deg); transition: transform 0.15s ease; }
+        .rail-chevron.open { transform: rotate(0deg); }
+        .rail-sub { padding: 9px 12px 9px 22px; font-size: 13px; }
+        .rail-btn { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .rail-btn.locked { opacity: 0.45; cursor: not-allowed; }
+        .rail-btn.locked:hover { background: transparent; color: rgba(255,255,255,0.5); }
+        .rail-lock { font-size: 11px; opacity: 0.8; }
+        .rail-countdown { font-size: 10px; letter-spacing: 0.06em; color: #80d090; background: rgba(80,200,120,0.12); border-radius: 4px; padding: 2px 6px; white-space: nowrap; }
+        /* Master table pager. Global because renderMasterPager builds it outside
+           the main markup, where styled-jsx scoped styles do not reach. */
+        .master-pager { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+        .master-pager-btn { font-family: 'Inter', sans-serif; font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(107,164,255,0.35); background: rgba(107,164,255,0.08); color: rgba(255,255,255,0.85); cursor: pointer; }
+        .master-pager-btn:hover:not(:disabled) { background: rgba(107,164,255,0.18); }
+        .master-pager-btn:disabled { opacity: 0.35; cursor: default; }
+        .master-pager-info { font-size: 12px; color: rgba(255,255,255,0.6); padding: 0 8px; }
+        /* Other Apps page. Global because AppIcon is its own component. */
+        .rail-section-link.active { background: rgba(107,164,255,0.14); color: #ffffff; }
+        .apps-heading { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 4px 0 28px; font-size: 15px; color: rgba(255,255,255,0.75); }
+        .apps-heading-logo { width: 32px; height: 32px; border-radius: 6px; object-fit: contain; }
+        .apps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 340px)); justify-content: center; gap: 20px; max-width: 1100px; margin: 0 auto; }
+        .app-card { display: flex; flex-direction: column; gap: 12px; padding: 22px; border-radius: 14px; background: rgba(255,255,255,0.04); border: 1px solid rgba(107,164,255,0.25); text-decoration: none; color: inherit; transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease; }
+        .app-card:hover { background: rgba(107,164,255,0.08); border-color: rgba(107,164,255,0.55); transform: translateY(-2px); }
+        .app-card-top { display: flex; align-items: center; gap: 14px; }
+        .app-icon { width: 44px; height: 44px; border-radius: 10px; object-fit: contain; background: rgba(255,255,255,0.92); padding: 4px; flex-shrink: 0; }
+        .app-icon-letter { display: flex; align-items: center; justify-content: center; background: rgba(107,164,255,0.18); color: #ffffff; font-family: 'Fraunces', serif; font-size: 20px; font-weight: 700; padding: 0; }
+        .app-card-name { font-family: 'Fraunces', serif; font-size: 19px; font-weight: 700; color: #ffffff; }
+        .app-card-desc { margin: 0; font-size: 13px; line-height: 1.6; color: rgba(255,255,255,0.65); }
+        .app-card-url { margin-top: auto; font-size: 12px; color: rgba(107,164,255,0.9); }
       `}</style>
 
       <style jsx>{`
@@ -2763,10 +2984,23 @@ export default function Dashboard() {
         .brand-mark { width: 42px; height: auto; border-radius: 8px; background: #ffffff; display: flex; align-items: center; justify-content: center; font-family: 'Fraunces', serif; font-weight: 700; font-size: 18px; color: #0a1628; padding: 3px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25); }
         .nav-title { position: absolute; left: 50%; transform: translateX(-50%); font-family: 'Fraunces', serif; font-size: 24px; font-weight: 700; color: #ffffff; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; pointer-events: none; }
         .section-rail { position: fixed; left: 0; top: 74px; bottom: 0; width: 196px; padding: 24px 14px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.015); z-index: 20; }
-        .rail-btn { text-align: left; padding: 11px 14px; border-radius: 10px; background: transparent; border: 1px solid transparent; color: rgba(255,255,255,0.5); font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
-        .rail-btn:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.85); }
-        .rail-btn.active { background: rgba(107,164,255,0.14); border-color: rgba(107,164,255,0.4); color: #ffffff; }
         .with-rail { margin-left: 196px; padding-top: 24px; }
+        .section-rail { width: 220px; overflow: hidden; }
+        .with-rail { margin-left: 220px; }
+        .section-rail.with-banner { bottom: 38px; }
+        .with-rail.with-banner { padding-bottom: 52px; }
+        .rail-viewas { width: 100%; box-sizing: border-box; padding: 7px 10px; border-radius: 6px; background: rgba(201,163,255,0.08); border: 1px solid rgba(201,163,255,0.4); color: #c9a3ff; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer; }
+        .rail-viewas option { background: #0a1e42; color: #ffffff; }
+        .rail-account { border-top: 1px solid rgba(255,255,255,0.08); padding: 14px 4px 4px; display: flex; flex-direction: column; gap: 10px; }
+        .rail-account .user-chip { align-items: flex-start; padding-left: 0; border-left: none; }
+        /* Name on its own line, role badge always underneath, then email. */
+        .rail-account .user-chip-main { flex-direction: column; align-items: flex-start; gap: 6px; }
+        .rail-account .user-badge-admin, .rail-account .user-badge-platform, .rail-account .user-badge-member { text-transform: uppercase; }
+        .rail-account .user-chip-email { overflow-wrap: anywhere; }
+        .rail-account .signout-btn { display: block; width: 100%; text-align: center; box-sizing: border-box; }
+        .rail-account .signout-blocked { opacity: 0.4; cursor: not-allowed; }
+        .rail-account .signout-blocked:hover { color: rgba(255,255,255,0.55); border-color: rgba(255,255,255,0.16); background: transparent; }
+        .imp-pop.imp-pop-up { top: auto; bottom: calc(100% + 10px); left: 0; right: auto; width: 300px; }
         @media (max-width: 900px) {
         .section-rail { position: static; width: auto; flex-direction: row; border-right: none; border-bottom: 1px solid rgba(255,255,255,0.07); }
           .with-rail { margin-left: 0; }
@@ -2780,7 +3014,7 @@ export default function Dashboard() {
         .user-chip-name { font-size: 13px; letter-spacing: 0.04em; text-transform: none; color: #ffffff; font-weight: 500; }
         .user-chip-email { font-size: 11px; letter-spacing: 0.02em; text-transform: none; color: rgba(255,255,255,0.4); }
         .user-badge-admin { font-size: 9px; letter-spacing: 0.14em; font-weight: 700; color: #80d090; background: rgba(80,200,120,0.12); border: 1px solid rgba(80,200,120,0.4); padding: 2px 7px; border-radius: 3px; }
-        .imp-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 60; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 9px 20px; background: #c9a3ff; color: #1a0b33; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; }
+        .imp-banner { position: fixed; bottom: 0; left: 0; right: 0; z-index: 60; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 9px 20px; background: #c9a3ff; color: #1a0b33; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; }
         .imp-banner-dot { width: 8px; height: 8px; border-radius: 50%; background: #1a0b33; animation: pulse 2s ease-in-out infinite; }
         .imp-exit-btn { padding: 4px 14px; border-radius: 6px; background: #1a0b33; border: none; color: #fff; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; cursor: pointer; }
         .imp-exit-btn:hover { background: #000; }
@@ -2809,11 +3043,6 @@ export default function Dashboard() {
 
         .tabs-section { position: relative; z-index: 10; padding: 0 32px; max-width: 1800px; margin: 0 auto 24px; }
         .tabs-pill { display: inline-flex; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 999px; padding: 6px; gap: 4px; backdrop-filter: blur(20px); }
-        .rail-btn { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-        .rail-btn.locked { opacity: 0.45; cursor: not-allowed; }
-        .rail-btn.locked:hover { background: transparent; color: rgba(255,255,255,0.5); }
-        .rail-lock { font-size: 11px; opacity: 0.8; }
-        .rail-countdown { font-size: 10px; letter-spacing: 0.06em; color: #80d090; background: rgba(80,200,120,0.12); border-radius: 4px; padding: 2px 6px; white-space: nowrap; }
         .welfare-locked { max-width: 560px; margin: 80px auto; text-align: center; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; padding: 44px 40px; }
         .welfare-locked-icon { font-size: 40px; margin-bottom: 18px; opacity: 0.8; }
         .welfare-locked h2 { font-family: 'Fraunces', serif; font-size: 24px; margin: 0 0 14px; color: #fff; }
@@ -2917,11 +3146,6 @@ export default function Dashboard() {
         .master-section-heading { font-family: 'Fraunces', serif; font-size: 32px; font-weight: 500; color: #ffffff; margin: 0 0 20px; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 20px; }
         .master-section-heading::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, rgba(107, 164, 255, 0.4) 0%, transparent 100%); }
         .master-section-count { font-family: 'Inter', sans-serif; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: rgba(107, 164, 255, 0.8); font-weight: 500; }
-        .master-pager { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
-        .master-pager-btn { font-family: 'Inter', sans-serif; font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(107,164,255,0.35); background: rgba(107,164,255,0.08); color: rgba(255,255,255,0.85); cursor: pointer; }
-        .master-pager-btn:hover:not(:disabled) { background: rgba(107,164,255,0.18); }
-        .master-pager-btn:disabled { opacity: 0.35; cursor: default; }
-        .master-pager-info { font-size: 12px; color: rgba(255,255,255,0.6); padding: 0 8px; }
         .master-meta-row { font-size: 12px; letter-spacing: 0.1em; color: rgba(255, 255, 255, 0.4); margin-bottom: 16px; }
 
         .master-missing-files { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; padding: 12px 16px; margin: 0 0 16px; background: rgba(255, 165, 0, 0.06); border: 1px solid rgba(255, 165, 0, 0.25); border-left: 3px solid rgba(255, 165, 0, 0.7); border-radius: 8px; font-size: 13px; color: rgba(255, 220, 180, 0.9); }
@@ -3330,6 +3554,38 @@ export default function Dashboard() {
             <span>System Operational</span>
           )}
 
+        </div>
+      </header>
+
+      {/* The only navigation: grouped sections, then the account card. */}
+      <nav className={`section-rail ${authUser?.isImpersonating ? 'with-banner' : ''}`}>
+        <SidebarNav
+          activeTab={activeTab}
+          onSelect={setActiveTab}
+          sections={NAV_SECTIONS
+            .filter(sec => !sec.staff || canManage)
+            .map(sec => ({
+              id: sec.id,
+              label: sec.label,
+              page: sec.page,
+              items: sec.items
+                .filter(n =>
+                  n.adminOnly ? !!authUser?.isAdmin
+                  : n.key === 'welfare' ? (canManage || welfareUnlocked)
+                  : (!n.staff || canManage))
+                .map(n => ({
+                  key: n.key,
+                  label: n.label,
+                  // Welfare stays locked for a Platform Admin until an admin grants access.
+                  locked: n.key === 'welfare' && !welfareUnlocked,
+                  countdown: n.key === 'welfare' && welfareAccess?.reason === 'granted'
+                    ? formatRemaining(welfareMsLeft) : '',
+                })),
+            }))
+            .filter(sec => sec.items.length > 0)}
+        />
+
+        <div className="rail-account">
           {/* Signed-in identity. Sourced from /api/auth/me, which reads the
               verified id token server-side. The ADMIN badge is presentation
               only: every admin route independently enforces requireAdmin(). */}
@@ -3348,90 +3604,111 @@ export default function Dashboard() {
               <div className="user-chip-email">{authUser.email}</div>
             </div>
           )}
+          {/* View as: pick an account and it switches straight away. */}
           {authUser?.isPlatformAdmin && !authUser?.isImpersonating && (
-            <div className="imp-wrap">
-              <button className="signout-btn" onClick={() => setImpOpen(o => !o)}
-                      title="View the dashboard as another account">
-                View as
-              </button>
-              {impOpen && (
-                <div className="imp-pop">
-                  <div className="imp-pop-title">View as another account</div>
-                  <select
-                    className="consultant-month-select"
-                    value={impEmail}
-                    onChange={(e) => setImpEmail(e.target.value)}
-                    disabled={impBusy || !dirUsers}
-                    style={{ width: '100%' }}
-                  >
-                    <option value="">
-                      {dirUsers ? 'Select an account...' : 'Loading accounts...'}
-                    </option>
-                    {(dirUsers || [])
-                      .filter(u => u.email !== authUser?.email)
-                      .map(u => (
-                        <option key={u.email} value={u.email}>
-                          {u.name} — {u.role}
-                        </option>
-                      ))}
-                  </select>
-                  {dirError && <div className="imp-pop-error">{dirError}</div>}
-                  {impError && <div className="imp-pop-error">{impError}</div>}
-                  <div className="imp-pop-actions">
-                    <button className="close-btn" onClick={() => setImpOpen(false)}>Cancel</button>
-                    <button className="consultant-primary-btn" onClick={startImpersonation}
-                            disabled={impBusy || !impEmail.trim()}>
-                      {impBusy ? 'Switching...' : 'View as'}
-                    </button>
-                  </div>
-                  <div className="imp-pop-note">
-                    Ends after 1 hour, or when you press Exit. Actions are
-                    recorded against both accounts.
-                  </div>
-                </div>
-              )}
-            </div>
+            <select
+              className="rail-viewas"
+              value=""
+              disabled={impBusy || !dirUsers}
+              onChange={(e) => { const v = e.target.value; if (v) startImpersonation(v); }}
+              title="View the dashboard as another account for up to 1 hour"
+            >
+              <option value="">{impBusy ? 'Switching...' : dirUsers ? 'View as...' : 'Loading accounts...'}</option>
+              {(dirUsers || [])
+                .filter(u => u.email !== authUser?.email)
+                .map(u => (
+                  <option key={u.email} value={u.email}>{u.name} · {u.role}</option>
+                ))}
+            </select>
           )}
-          {authUser?.authenticated && (
+          {(impError || dirError) && <div className="imp-pop-error">{impError || dirError}</div>}
+          {authUser?.authenticated && !authUser.isImpersonating && (
             <a className="signout-btn" href="/api/auth/logout" title="Sign out of the dashboard">
               Sign out
             </a>
           )}
+          {/* Signing out here would sign out the real account in every tab. */}
+          {authUser?.authenticated && authUser.isImpersonating && (
+            <span className="signout-btn signout-blocked" aria-disabled="true"
+                  title="You're in proxy mode and cannot perform this action. Use Exit in the banner to leave View as.">
+              Sign out
+            </span>
+          )}
         </div>
-      </header>
-
-      {/* The only navigation. Replaces the old tab bar entirely. */}
-      <nav className="section-rail">
-        {NAV_ITEMS.filter(n => !n.adminOnly || canManage).map(n => {
-          // Welfare stays visible to everyone but is locked until an admin
-          // grants access. Hiding it would leave people unable to ask for it.
-          const locked = n.key === 'welfare' && !welfareUnlocked;
-          const left = n.key === 'welfare' && welfareAccess?.reason === 'granted'
-            ? formatRemaining(welfareMsLeft) : '';
-          return (
-            <button
-              key={n.key}
-              className={`rail-btn ${activeTab === n.key ? 'active' : ''} ${locked ? 'locked' : ''}`}
-              onClick={() => { if (!locked) setActiveTab(n.key); }}
-              disabled={locked}
-              title={locked
-                ? 'Welfare is locked. An administrator must grant you access, for between 1 and 7 days.'
-                : left
-                  ? `Welfare access expires in ${left}`
-                  : n.label}
-            >
-              <span className="rail-btn-label">{n.label}</span>
-              {locked && <span className="rail-lock" aria-label="locked">&#128274;</span>}
-              {!locked && left && <span className="rail-countdown">{left}</span>}
-            </button>
-          );
-        })}
       </nav>
 
-      <div className="with-rail">
+      <div className={`with-rail ${authUser?.isImpersonating ? 'with-banner' : ''}`}>
 
       <section className="content-section">
-        {/* ALL INFO TAB */}
+        {/* OTHER APPS: links to other Gig Workers Universe apps, for everyone. */}
+        {activeTab === 'other-apps' && (
+          <div className="tab-panel">
+            <div className="apps-heading">
+              <img src="/logo.png" alt="" className="apps-heading-logo"
+                   onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
+              <span>Links to other apps operated by Gig Workers Universe</span>
+            </div>
+            <div className="apps-grid">
+              {OTHER_APPS.map(app => (
+                <a key={app.url} className="app-card" href={app.url} target="_blank" rel="noopener noreferrer">
+                  <div className="app-card-top">
+                    <AppIcon url={app.url} name={app.name} />
+                    <span className="app-card-name">{app.name}</span>
+                  </div>
+                  <p className="app-card-desc">{app.description}</p>
+                  <span className="app-card-url">{new URL(app.url).host} &#8599;</span>
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* UNCLASSIFIED FILES: .pdf and .zip, Admin only.
+            /api/files leaves them out for Members and /api/download refuses them. */}
+        {activeTab === 'unclassified' && authUser?.isAdmin && (() => {
+          const files = allFilesRaw
+            .filter((f) => isExcludedByExtension(f.filename))
+            .sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
+          return (
+            <div className="tab-panel">
+              <p className="roles-intro">
+                PDF and ZIP files received from carriers. They are never used in Master, Welfare or reports, so they are kept here instead of All Records.
+              </p>
+              {loading && <div className="loading-state">Loading files...</div>}
+              {error && <div className="error-state">Error: {error}</div>}
+              {!loading && !error && files.length === 0 && (
+                <div className="empty-state">No PDF or ZIP files.</div>
+              )}
+              {!loading && !error && files.length > 0 && (
+                <div className="master-table-wrapper">
+                  <table className="master-table roles-table">
+                    <thead>
+                      <tr><th>File</th><th>Carrier</th><th>Month</th><th>Size</th><th>Received</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                      {files.map((f) => {
+                        const sys = (f.key.match(/^carrier=([^/]+)\//) || [])[1] || 'unknown';
+                        const d = detectMonthYear(f.filename);
+                        return (
+                          <tr key={f.key}>
+                            <td className="roles-left">{f.filename}</td>
+                            <td>{prettifySystemName(sys)}</td>
+                            <td>{d ? monthLabel(d.year, d.month) : ''}</td>
+                            <td>{formatBytes(f.size)}</td>
+                            <td>{f.lastModified ? new Date(f.lastModified).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ''}</td>
+                            <td><button className="signout-btn" onClick={() => handleDownload(f.key, f.filename)}>Download</button></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* ALL RECORDS TAB (formerly All Info) */}
         {activeTab === 'all-info' && (
           <>
             <div className="search-bar">
@@ -4241,12 +4518,12 @@ export default function Dashboard() {
         )}
 
         {/* ==================== CONSULTANT REPORT TAB ==================== */}
-        {activeTab === 'consultant' && (
+        {(activeTab === 'consultant' || activeTab === 'consultant-directory') && (
           <div className="consultant-dashboard">
             {/* Header: title + month selector + actions */}
             <div className="consultant-header-row">
               <div className="consultant-title-block">
-                <h2>Consultant Report</h2>
+                <h2>{activeTab === 'consultant-directory' ? 'Consultant Directory' : 'Consultant Report'}</h2>
                 <div className="consultant-subtitle">
                   {consultantSelectedMonth ? (() => {
                     const mfMonth = labelToManifestMonth(consultantSelectedMonth);
@@ -4340,7 +4617,7 @@ export default function Dashboard() {
             {!consultantSelectedMonth && !consultantMonthsLoading && (
               <div className="consultant-empty-state">
                 <h3>No reports yet</h3>
-                <p>Add a month, include its source files in the All Info tab, then generate the report.</p>
+                <p>Add a month, include its source files in the All Records tab, then generate the report.</p>
                 <button className="consultant-primary-btn" onClick={() => setShowNewMonthDialog(true)}>+ Add Month</button>
               </div>
             )}
@@ -4348,7 +4625,7 @@ export default function Dashboard() {
             {/* Included-files panel. There is no upload step and no file-count
                 gate: whatever is included for this month in All Info is what the
                 Lambda parses. Fewer or more than 10 files is allowed. */}
-            {consultantSelectedMonth && (() => {
+            {activeTab === 'consultant' && consultantSelectedMonth && (() => {
               const mfMonth = labelToManifestMonth(consultantSelectedMonth);
               const loadedManifest = !!mfMonth && manifestMonthsLoaded.has(mfMonth);
               const keys = mfMonth ? Array.from(includedByMonth[mfMonth] || []) : [];
@@ -4362,7 +4639,7 @@ export default function Dashboard() {
                         'Loading inclusion manifest...'
                       ) : nIncluded === 0 ? (
                         <span style={{ color: '#e0a0a0' }}>
-                          No files included for this month. Go to All Info, find {consultantSelectedMonth},
+                          No files included for this month. Go to All Records, find {consultantSelectedMonth},
                           and click Include on the files this report should use.
                         </span>
                       ) : (
@@ -4370,7 +4647,7 @@ export default function Dashboard() {
                           {nIncluded} file{nIncluded !== 1 ? 's' : ''} included
                           {' · '}
                           <span style={{ color: 'rgba(107, 164, 255, 0.85)' }}>
-                            inclusion is managed in the All Info tab
+                            inclusion is managed in the All Records tab
                           </span>
                         </>
                       )}
@@ -4415,8 +4692,8 @@ export default function Dashboard() {
               <div className="loading-state">Loading report...</div>
             )}
 
-            {/* Report viewer */}
-            {consultantReportView?.report && (
+            {/* Report viewer: Monthly page */}
+            {activeTab === 'consultant' && consultantReportView?.report && (
               <div className="consultant-viewer-block">
                 <div className="consultant-viewer-header">
                   <h3>Consultant Report</h3>
@@ -4495,8 +4772,13 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Directory viewer */}
-            {consultantReportView?.directory && (
+            {/* Directory page: shown when this month has no directory yet */}
+            {activeTab === 'consultant-directory' && consultantSelectedMonth && !consultantReportLoading && !consultantReportView?.directory && (
+              <div className="empty-state">No consultant directory for {consultantSelectedMonth} yet. It is created when the Monthly report is generated.</div>
+            )}
+
+            {/* Directory viewer: Directory page */}
+            {activeTab === 'consultant-directory' && consultantReportView?.directory && (
               <div className="consultant-viewer-block">
                 <div className="consultant-viewer-header">
                   <h3>Consultant Directory</h3>
@@ -4765,10 +5047,10 @@ export default function Dashboard() {
             <div className="welfare-notes">
               <div className="welfare-notes-title">How these figures are calculated</div>
               <ul>
-                <li><strong>Which files are used.</strong> Remittances are taken only from files <strong>Included</strong> in the All Info tab for <strong>this</strong> month. Credits are taken from the <strong>previous</strong> month, from <strong>any</strong> file regardless of Include status, except auto-excluded types (.pdf and .zip).</li>
+                <li><strong>Which files are used.</strong> Remittances are taken only from files <strong>Included</strong> in the All Records tab for <strong>this</strong> month. Credits are taken from the <strong>previous</strong> month, from <strong>any</strong> file regardless of Include status, except auto-excluded types (.pdf and .zip).</li>
                 <li><strong>Why credits are a month behind.</strong> Remittances cover the current coverage month; credits cover the prior work period. So an August wire pairs August remittances with July credits.</li>
                 <li><strong>Why the two rules differ.</strong> Some carriers ship several remittance files for one month; Cassena has Invoice, Vision and the main remittance. Inclusion is what identifies the correct one. Credits are often left un-included so they do not disturb the Consultant Report, so requiring inclusion would zero them out.</li>
-                <li><strong>Month matching</strong> reads the month and year from the filename, the same way the All Info tab groups files.</li>
+                <li><strong>Month matching</strong> reads the month and year from the filename, the same way the All Records tab groups files.</li>
                 <li><strong>Remittance Amount</strong> sums the amount column across <strong>every row</strong> of the remittance file. A member on two plans pays two premiums, so this is deliberately not de-duplicated.</li>
                 <li><strong>Enrolled</strong> counts <strong>distinct members</strong> after de-duplication, matching how the Master Dashboard counts people rather than plan enrolments. It is normally lower than the row count.</li>
                 <li><strong>GIG Cap Fee</strong> = Enrolled &times; fee rate.</li>
@@ -5381,7 +5663,7 @@ export default function Dashboard() {
             <div className="upload-modal-body">
               {Object.values(uploadRowStatus).some(s => s && s.kind === 'success') && (
                 <div className="upload-notice">
-                  Upload complete. Please switch to the <strong>All Info</strong> tab and verify the uploaded file(s) appear in the correct month. If any file is missing, refresh the page.
+                  Upload complete. Please switch to the <strong>All Records</strong> tab and verify the uploaded file(s) appear in the correct month. If any file is missing, refresh the page.
                 </div>
               )}
               <table className="upload-table">

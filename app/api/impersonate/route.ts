@@ -8,9 +8,11 @@
 // can check how every role sees the dashboard without maintaining several
 // logins.
 //
-// The cookie is read by getSession() in lib/auth.ts, which only honours it when
-// the REAL signed-in account is an admin or platform admin. Setting the cookie
-// by hand therefore achieves nothing.
+// View as runs in its own browser tab: that tab sends the x-view-as header on
+// each request (see getSession in lib/auth.ts), so the original tab keeps the
+// real identity. This route checks permission and records who started and
+// stopped it. getSession only honours the header when the REAL signed-in
+// account is an admin or platform admin, so sending it by hand achieves nothing.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession, IMPERSONATE_COOKIE } from '@/lib/auth';
@@ -60,13 +62,8 @@ export async function POST(req: NextRequest) {
   console.warn(`[impersonate] ${session.email} is now acting as ${email}`);
 
   const res = NextResponse.json({ ok: true, actingAs: email, expiresInSeconds: MAX_AGE_SECONDS });
-  res.cookies.set(IMPERSONATE_COOKIE, email, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    path: '/',
-    maxAge: MAX_AGE_SECONDS,
-  });
+  // Clear the cookie the old version used, so it can never apply to every tab.
+  res.cookies.set(IMPERSONATE_COOKIE, '', { path: '/', maxAge: 0 });
   return res;
 }
 

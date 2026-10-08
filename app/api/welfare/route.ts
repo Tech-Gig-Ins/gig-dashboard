@@ -386,7 +386,7 @@ export async function GET(req: NextRequest) {
 
         if (monthFiles.length === 0) {
           return { status: 404, body: {
-            error: `No files found for ${month}. Check the All Info tab.`,
+            error: `No files found for ${month}. Check the All Records tab.`,
           } };
         }
 

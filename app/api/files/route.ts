@@ -69,6 +69,8 @@ export async function GET(req: Request) {
 
         const lower = obj.Key.toLowerCase();
         if (!ALLOWED_EXTENSIONS.some((ext) => lower.endsWith(ext))) continue;
+        // PDF and ZIP files (Unclassified Files page) are listed only for Admin.
+        if ((lower.endsWith('.pdf') || lower.endsWith('.zip')) && !gate.isAdmin) continue;
 
         const parts = obj.Key.split('/');
         const filename = parts[parts.length - 1];
