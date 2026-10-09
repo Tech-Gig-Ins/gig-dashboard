@@ -163,6 +163,9 @@ export async function getSession(req: AnyRequest): Promise<Session | null> {
     if (impersonating && (real.isAdmin || real.isPlatformAdmin)) {
       const target = impersonating.trim().toLowerCase();
       if (target && target !== real.email && emailDomain(target) === ALLOWED_DOMAIN) {
+        // PA Monitor: record what this View as request did (once per request).
+        const { logProxyRequest } = await import('@/lib/paMonitor');
+        await logProxyRequest(req as Request, real.email, target);
         return {
           email: target,
           firstName: target.split('@')[0],

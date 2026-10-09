@@ -71,7 +71,7 @@ type SearchResponse = {
   results: SearchMatch[];
 };
 
-type TabKey = 'master' | 'all-info' | 'unclassified' | 'consultant' | 'consultant-directory' | 'billing' | 'welfare' | 'users' | 'support-pending' | 'support-resolved' | 'other-apps';
+type TabKey = 'master' | 'all-info' | 'unclassified' | 'consultant' | 'consultant-directory' | 'billing' | 'welfare' | 'users' | 'pa-monitor' | 'support-pending' | 'support-resolved' | 'other-apps';
 
 type MemberRecord = {
   memberName: string;
@@ -495,6 +495,18 @@ if (typeof window !== 'undefined' && !(window as any).__gwuViewAs) {
     headers.set('x-view-as', v.email);
     return original(input, { ...init, headers });
   };
+
+  // PA Monitor. A View as tab that is reloaded or reopened records "Resumed";
+  // one that is closed, reloaded or navigated away records "Ended" as it goes.
+  // keepalive lets the browser finish that request after the tab is gone.
+  // (Exit clears View as before closing, so it is not recorded twice.)
+  if (!m && readViewAs()) {
+    window.fetch('/api/impersonate', { method: 'PATCH' }).catch(() => {});
+  }
+  window.addEventListener('pagehide', () => {
+    if (!readViewAs()) return;
+    try { window.fetch('/api/impersonate?reason=closed', { method: 'DELETE', keepalive: true }).catch(() => {}); } catch { /* ignore */ }
+  });
 }
 
 // ===== Support =====
@@ -723,6 +735,7 @@ export default function Dashboard() {
     ] },
     { id: 'activity', label: 'Activity', staff: true, items: [
       { key: 'users', label: 'Users' },
+      { key: 'pa-monitor', label: 'PA Monitor', adminOnly: true },
     ] },
     { id: 'support', label: 'Support', items: [
       { key: 'support-pending',  label: 'Pending' },
@@ -1046,6 +1059,33 @@ export default function Dashboard() {
     isImpersonating?: boolean; actualEmail?: string;
   };
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+
+  // ===== PA Monitor (Admin only) =====
+  type PaEvent = { at: string; actor: string; actingAs: string; action: string; detail: string; inferred?: boolean };
+  const [paDays, setPaDays] = useState<string[] | null>(null);
+  const [paDate, setPaDate] = useState<string | null>(null);
+  const [paEvents, setPaEvents] = useState<PaEvent[] | null>(null);
+  const [paError, setPaError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (activeTab !== 'pa-monitor' || !authUser?.isAdmin) return;
+    fetch('/api/pa-monitor')
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`Failed (${r.status})`))))
+      .then((d: { days: string[] }) => {
+        setPaDays(d.days);
+        setPaDate(prev => prev && d.days.includes(prev) ? prev : d.days[0] || null);
+      })
+      .catch((e: any) => setPaError(e.message || 'Failed to load'));
+  }, [activeTab, authUser?.isAdmin]);
+
+  useEffect(() => {
+    if (activeTab !== 'pa-monitor' || !paDate) return;
+    setPaEvents(null);
+    fetch(`/api/pa-monitor?date=${paDate}`)
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`Failed (${r.status})`))))
+      .then((d: { events: PaEvent[] }) => setPaEvents(d.events))
+      .catch((e: any) => setPaError(e.message || 'Failed to load'));
+  }, [activeTab, paDate]);
 
   // ===== Support pages =====
   const [supportIndex, setSupportIndex] = useState<SupportIndex | null>(null);
@@ -3168,6 +3208,14 @@ export default function Dashboard() {
         .sup-status { display: block; margin-top: 4px; padding: 8px 10px; border-radius: 6px; }
         .sup-card.open .sup-status { background: rgba(240,198,74,0.14); }
         .sup-card.closed .sup-status { background: rgba(95,211,138,0.12); }
+        /* PA Monitor */
+        .pam-daybar { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0 0 18px; }
+        .pam-dayselect { padding: 8px 12px; border-radius: 8px; background: rgba(255,255,255,0.05); border: 1px solid rgba(107,164,255,0.35); color: #ffffff; font-size: 14px; }
+        .pam-dayselect option { background: #0a1e42; }
+        .pam-stats { margin: 0 auto 22px; }
+        .pam-table tr.pam-session td { background: rgba(201,163,255,0.08); }
+        .pam-table tr.pam-inferred td { font-style: italic; color: rgba(255,255,255,0.55); }
+        .pam-table td.pam-detail { white-space: normal !important; min-width: 260px; max-width: 420px; line-height: 1.5; color: rgba(255,255,255,0.75); }
       `}</style>
 
       <style jsx>{`
@@ -3667,6 +3715,7 @@ export default function Dashboard() {
         .include-toggle.off { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.16); color: rgba(255, 255, 255, 0.5); }
         .include-toggle.off:hover:not(:disabled) { background: rgba(80, 200, 120, 0.12); border-color: rgba(80, 200, 120, 0.35); color: #80d090; }
         .include-toggle:disabled { opacity: 0.45; cursor: wait; }
+        .include-readonly { color: #80d090; font-size: 12px; font-weight: 600; white-space: nowrap; cursor: default; }
         .download-btn { display: flex; align-items: center; gap: 6px; padding: 6px 14px; background: rgba(107, 164, 255, 0.12); border: 1px solid rgba(107, 164, 255, 0.25); border-radius: 8px; color: #6ba4ff; font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 500; cursor: pointer; transition: all 0.15s ease; }
         .download-btn:hover { background: rgba(107, 164, 255, 0.22); border-color: rgba(107, 164, 255, 0.5); color: #ffffff; }
         .download-btn:active { transform: scale(0.96); }
@@ -3849,6 +3898,64 @@ export default function Dashboard() {
       <div className={`with-rail ${authUser?.isImpersonating ? 'with-banner' : ''}`}>
 
       <section className="content-section">
+        {/* PA MONITOR: what the Platform Admin did while using View as. */}
+        {activeTab === 'pa-monitor' && authUser?.isAdmin && (() => {
+          const fmtDay = (d: string) => new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+          const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit' }) + ' ET';
+          const i = paDays && paDate ? paDays.indexOf(paDate) : -1;
+          const ev = paEvents || [];
+          const sessions = ev.filter(e => e.action === 'Started View as').length;
+          const accounts = new Set(ev.map(e => e.actingAs)).size;
+          const actions = ev.filter(e => e.action !== 'Started View as' && e.action !== 'Ended View as').length;
+          return (
+            <div className="tab-panel">
+              <p className="roles-intro">
+                Activity of the Platform Admin (PA) while using View as: whose account was used, when, and what was done in it,
+                including Welfare access grants, billing chat messages and searches.
+              </p>
+              {paError && <div className="error-state">Error: {paError}</div>}
+              {paDays && paDays.length === 0 && <div className="empty-state">No View as activity has been recorded yet.</div>}
+              {paDays && paDays.length > 0 && paDate && (
+                <>
+                  <div className="pam-daybar">
+                    <button className="sup-cal-nav" disabled={i >= paDays.length - 1} onClick={() => setPaDate(paDays[i + 1])} aria-label="Earlier day">&#8249;</button>
+                    <select className="pam-dayselect" value={paDate} onChange={e => setPaDate(e.target.value)}>
+                      {paDays.map(d => <option key={d} value={d}>{fmtDay(d)}</option>)}
+                    </select>
+                    <button className="sup-cal-nav" disabled={i <= 0} onClick={() => setPaDate(paDays[i - 1])} aria-label="Later day">&#8250;</button>
+                  </div>
+                  <div className="sup-stats pam-stats">
+                    <div className="sup-stat"><div className="sup-stat-label">View as sessions</div><div className="sup-stat-value">{sessions}</div></div>
+                    <div className="sup-stat"><div className="sup-stat-label">Accounts viewed</div><div className="sup-stat-value">{accounts}</div></div>
+                    <div className="sup-stat"><div className="sup-stat-label">Actions taken</div><div className="sup-stat-value">{actions}</div></div>
+                  </div>
+                  {!paEvents && <div className="loading-state">Loading activity...</div>}
+                  {paEvents && (
+                    <div className="master-table-wrapper">
+                      <table className="master-table roles-table pam-table">
+                        <thead>
+                          <tr><th>Time</th><th>Platform Admin</th><th>Viewing as</th><th>Activity</th><th>Details</th></tr>
+                        </thead>
+                        <tbody>
+                          {ev.map((e, n) => (
+                            <tr key={n} className={`${e.action.endsWith('View as') ? 'pam-session' : ''} ${e.inferred ? 'pam-inferred' : ''}`}>
+                              <td>{fmtTime(e.at)}</td>
+                              <td className="roles-left">{e.actor}</td>
+                              <td className="roles-left">{e.actingAs}</td>
+                              <td className="roles-left"><b>{e.action}</b></td>
+                              <td className="roles-left pam-detail">{e.detail}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })()}
+
         {/* SUPPORT: daily AI summaries, split into Pending (STATUS_FLAG OPEN) and
             Resolved (CLOSED). Text is shown exactly as the Apps Script wrote it. */}
         {supportPage && (() => {
@@ -4172,7 +4279,9 @@ export default function Dashboard() {
                         <span className="month-included-count" title="Files counted in Master Dashboard and Consultant Report">
                           {nIncluded} included
                         </span>
-                        <span className="month-include-bulk">
+                        {/* Changing what counts is for Admin and Platform Admin only
+                            (the server refuses everyone else too). */}
+                        {canManage && <span className="month-include-bulk">
                           <button
                             className="include-bulk-btn"
                             onClick={() => setIncludedBulk(mfMonth, monthFileKeys, true)}
@@ -4189,7 +4298,7 @@ export default function Dashboard() {
                           >
                             Exclude all
                           </button>
-                        </span>
+                        </span>}
                       </h2>
                       {Object.keys(monthBlock.systems).sort((a, b) => {
                         // Sort in canonical order; unknown/unclassified last
@@ -4224,7 +4333,13 @@ export default function Dashboard() {
                                         can never contribute to either calculation. The button still
                                         renders if such a file is somehow already in the manifest, so
                                         it can be removed rather than being stuck. */}
-                                    {(!isExcludedByExtension(file.filename) || isIncluded(mfMonth, file.key)) && (
+                                    {/* Members see which files count, but cannot change it. */}
+                                    {!canManage && isIncluded(mfMonth, file.key) && (
+                                      <span className="include-readonly" title="Only Admin and Platform Admin can change which files are included">
+                                        {'\u2713 Included'}
+                                      </span>
+                                    )}
+                                    {canManage && (!isExcludedByExtension(file.filename) || isIncluded(mfMonth, file.key)) && (
                                       <button
                                         className={`include-toggle ${isIncluded(mfMonth, file.key) ? 'on' : 'off'}`}
                                         onClick={(e) => { e.stopPropagation(); toggleIncluded(mfMonth, file.key, !isIncluded(mfMonth, file.key)); }}

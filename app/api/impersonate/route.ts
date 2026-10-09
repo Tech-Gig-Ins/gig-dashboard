@@ -16,6 +16,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession, IMPERSONATE_COOKIE } from '@/lib/auth';
+import { recordEvent } from '@/lib/paMonitor';
 
 const ALLOWED_DOMAIN = (process.env.ALLOWED_EMAIL_DOMAIN || '')
   .trim().toLowerCase().replace(/^@/, '');
@@ -60,6 +61,7 @@ export async function POST(req: NextRequest) {
   }
 
   console.warn(`[impersonate] ${session.email} is now acting as ${email}`);
+  await recordEvent({ actor: session.email, actingAs: email, action: 'Started View as', detail: `Opened a new tab as ${email}; the session auto-ends after 1 hour` });
 
   const res = NextResponse.json({ ok: true, actingAs: email, expiresInSeconds: MAX_AGE_SECONDS });
   // Clear the cookie the old version used, so it can never apply to every tab.
@@ -71,10 +73,28 @@ export async function DELETE(req: NextRequest) {
   const session = await getSession(req);
   const who = session?.actualEmail || session?.email || 'unknown';
   console.warn(`[impersonate] ${who} stopped impersonating`);
+  if (session?.isImpersonating) {
+    const closed = req.nextUrl.searchParams.get('reason') === 'closed';
+    await recordEvent({
+      actor: who, actingAs: session.email, action: 'Ended View as',
+      detail: closed ? 'Closed, reloaded or left the View as tab' : 'Clicked Exit in the View as banner',
+    });
+  }
 
   const res = NextResponse.json({ ok: true });
   res.cookies.set(IMPERSONATE_COOKIE, '', { path: '/', maxAge: 0 });
   return res;
+}
+
+// A View as tab that was reloaded or reopened (PA Monitor only).
+export async function PATCH(req: NextRequest) {
+  const session = await getSession(req);
+  if (!session?.isImpersonating) return NextResponse.json({ ok: false });
+  await recordEvent({
+    actor: session.actualEmail || 'unknown', actingAs: session.email,
+    action: 'Resumed View as', detail: 'Reloaded or reopened the same View as tab',
+  });
+  return NextResponse.json({ ok: true });
 }
 
 export const runtime = 'nodejs';
