@@ -9,9 +9,9 @@ frontend:
         # Expose console env vars to the Next.js SSR runtime. Every variable the
         # app reads must be covered here; a miss fails at RUNTIME, not build.
         - echo "=== variable NAMES visible to the build (values never printed) ==="
-        - env | grep -E '^(MY_AWS_|S3_|COGNITO_|APP_URL|ALLOWED_EMAIL_DOMAIN|ADMIN_EMAILS|PLATFORM_ADMIN_EMAILS|CONSULTANT_LAMBDA_NAME|BILLING_LAMBDA_NAME)' | cut -d= -f1 | sort || echo "NONE MATCHED"
+        - env | grep -E '^(MY_AWS_|S3_|COGNITO_|APP_URL|ALLOWED_EMAIL_DOMAIN|ADMIN_EMAILS|PLATFORM_ADMIN_EMAILS|CONSULTANT_LAMBDA_NAME|BILLING_LAMBDA_NAME|GOOGLE_SERVICE_ACCOUNT_KEY)' | cut -d= -f1 | sort || echo "NONE MATCHED"
         - echo "================================================================"
-        - env | grep -E '^(MY_AWS_|S3_|COGNITO_|APP_URL=|ALLOWED_EMAIL_DOMAIN=|ADMIN_EMAILS=|PLATFORM_ADMIN_EMAILS=|CONSULTANT_LAMBDA_NAME=|BILLING_LAMBDA_NAME=)' >> .env.production || true
+        - env | grep -E '^(MY_AWS_|S3_|COGNITO_|APP_URL=|ALLOWED_EMAIL_DOMAIN=|ADMIN_EMAILS=|PLATFORM_ADMIN_EMAILS=|CONSULTANT_LAMBDA_NAME=|BILLING_LAMBDA_NAME=|GOOGLE_SERVICE_ACCOUNT_KEY=)' >> .env.production || true
         # Unique per deploy. /api/version serves this, the browser polls it, and
         # a change means the open tab is running stale code.
         - echo "BUILD_ID=$(date +%s)" >> .env.production

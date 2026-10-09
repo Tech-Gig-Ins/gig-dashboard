@@ -71,7 +71,7 @@ type SearchResponse = {
   results: SearchMatch[];
 };
 
-type TabKey = 'master' | 'all-info' | 'unclassified' | 'consultant' | 'consultant-directory' | 'billing' | 'welfare' | 'users' | 'other-apps';
+type TabKey = 'master' | 'all-info' | 'unclassified' | 'consultant' | 'consultant-directory' | 'billing' | 'welfare' | 'users' | 'support-pending' | 'support-resolved' | 'other-apps';
 
 type MemberRecord = {
   memberName: string;
@@ -497,6 +497,101 @@ if (typeof window !== 'undefined' && !(window as any).__gwuViewAs) {
   };
 }
 
+// ===== Support =====
+// Daily AI support summaries, pushed by the Apps Script and shown unchanged.
+type SupportDay = { date: string; pending: number; resolved: number; emails: number; totalMessages: number };
+type SupportItem = { subject: string; msgCount: number; summary: string; isOpen: boolean };
+type SupportReport = {
+  date: string; dayLabel: string; emails: number; totalMessages: number; busiest: string; items: SupportItem[];
+  previous?: { emails: number; totalMessages: number; pending: number; resolved: number } | null; // the day before, from the server
+};
+type SupportIndex = {
+  days: SupportDay[]; latestDate: string | null; pending: boolean; resolved: boolean;
+  since: string | null; viewed: { pending: string[]; resolved: string[] };
+};
+
+// One figure for the selected day, compared with the day before it.
+// Default (unresolved emails, total messages): more or the same is bad, so a
+//   red up arrow; fewer is a green down arrow.
+// higherIsBetter (resolved emails): more or the same is good, so a green up
+//   arrow; fewer is a red down arrow.
+function SupportStat({ label, value, prev, higherIsBetter = false }: {
+  label: string; value: number; prev: number | null; higherIsBetter?: boolean;
+}) {
+  const cur = Number(value);
+  const before = prev === null || prev === undefined ? NaN : Number(prev);
+  const diff = Number.isFinite(cur) && Number.isFinite(before) ? cur - before : null;
+  // Is the change good news? Equal counts as good only when higher is better.
+  const good = diff === null ? null : higherIsBetter ? diff >= 0 : diff < 0;
+  const arrow = diff === null ? null
+    : <span className={`sup-stat-arrow ${good ? 'good' : 'bad'}`} aria-label={diff >= 0 ? 'up' : 'down'}>
+        {diff >= 0 ? '\u25B2' : '\u25BC'}
+      </span>;
+  const text = diff === null ? 'No summary for yesterday'
+    : diff === 0 ? 'Same as yesterday'
+    : diff > 0 ? `${diff} more than yesterday` : `${-diff} fewer than yesterday`;
+  return (
+    <div className="sup-stat">
+      <div className="sup-stat-label">{label}</div>
+      <div className="sup-stat-value">{Number.isFinite(cur) ? cur : '-'}{arrow}</div>
+      <span className={`sup-stat-trend ${diff === null || diff === 0 ? 'flat' : good ? 'good' : 'bad'}`}>{text}</span>
+    </div>
+  );
+}
+
+const MONTHS_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+// Month calendar. Days with a summary are clickable. A coloured mark (amber
+// Pending, green Resolved) shows days with entries you have not opened yet on
+// this page; it clears once you open that day.
+function SupportCalendar({ days, selected, page, onSelect, isUnseen }: {
+  days: SupportDay[]; selected: string | null; page: 'pending' | 'resolved'; onSelect: (d: string) => void;
+  isUnseen: (date: string) => boolean;
+}) {
+  const byDate = useMemo(() => new Map(days.map(d => [d.date, d])), [days]);
+  const start = selected || days[0]?.date || new Date().toISOString().slice(0, 10);
+  const [ym, setYm] = useState(start.slice(0, 7));
+  useEffect(() => { if (selected) setYm(selected.slice(0, 7)); }, [selected]);
+  const [y, m] = ym.split('-').map(Number);
+  const lead = new Date(y, m - 1, 1).getDay();
+  const count = new Date(y, m, 0).getDate();
+  const shift = (delta: number) => {
+    const d = new Date(y, m - 1 + delta, 1);
+    setYm(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  };
+  const cells: (string | null)[] = [...Array(lead).fill(null)];
+  for (let d = 1; d <= count; d++) cells.push(`${ym}-${String(d).padStart(2, '0')}`);
+  return (
+    <div className="sup-cal">
+      <div className="sup-cal-head">
+        <button className="sup-cal-nav" onClick={() => shift(-1)} aria-label="Previous month">&#8249;</button>
+        <span>{MONTHS_LONG[m - 1]} {y}</span>
+        <button className="sup-cal-nav" onClick={() => shift(1)} aria-label="Next month">&#8250;</button>
+      </div>
+      <div className="sup-cal-grid">
+        {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => <span key={i} className="sup-cal-dow">{d}</span>)}
+        {cells.map((date, i) => {
+          if (!date) return <span key={i} />;
+          const info = byDate.get(date);
+          const n = info ? (page === 'pending' ? info.pending : info.resolved) : 0;
+          return (
+            <button
+              key={i}
+              className={`sup-cal-day ${info ? 'has' : ''} ${selected === date ? 'sel' : ''}`}
+              disabled={!info}
+              onClick={() => info && onSelect(date)}
+              title={info ? `${info.pending} pending, ${info.resolved} resolved${n > 0 && isUnseen(date) ? ' (not opened yet)' : ''}` : 'No summary'}
+            >
+              {Number(date.slice(8))}
+              {n > 0 && isUnseen(date) && <span className={`sup-cal-mark ${page}`} />}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ===== Other Apps =====
 // Other apps run by Gig Workers Universe. Each icon is loaded from the app's
 // own site, trying a large icon first, then favicon.ico, then the first letter.
@@ -526,7 +621,7 @@ function AppIcon({ url, name }: { url: string; name: string }) {
 
 // Sidebar sections. A separate component so opening or closing a section only
 // redraws the sidebar, not the whole dashboard.
-type RailItem = { key: TabKey; label: string; locked: boolean; countdown: string };
+type RailItem = { key: TabKey; label: string; locked: boolean; countdown: string; dot?: boolean };
 type RailSection = { id: string; label: string; items: RailItem[]; page?: TabKey };
 const SidebarNav = memo(function SidebarNav({ sections, activeTab, onSelect }: {
   sections: RailSection[];
@@ -566,7 +661,7 @@ const SidebarNav = memo(function SidebarNav({ sections, activeTab, onSelect }: {
               onClick={() => setOpen(prev => ({ ...prev, [sec.id]: !prev[sec.id] }))}
               aria-expanded={isOpen}
             >
-              <span>{sec.label}</span>
+              <span>{sec.label}{sec.items.some(n => n.dot) && <span className="rail-dot" aria-label="new" />}</span>
               <span className={`rail-chevron ${isOpen ? 'open' : ''}`} aria-hidden="true">&#9662;</span>
             </button>
             <div className={`rail-items ${isOpen ? 'open' : ''}`}>
@@ -574,7 +669,7 @@ const SidebarNav = memo(function SidebarNav({ sections, activeTab, onSelect }: {
                 {sec.items.map(n => (
                   <button
                     key={n.key}
-                    className={`rail-btn rail-sub ${activeTab === n.key ? 'active' : ''} ${n.locked ? 'locked' : ''}`}
+                    className={`rail-btn rail-sub ${activeTab === n.key ? 'active' : ''} ${n.locked ? 'locked' : ''} ${n.dot ? 'has-dot' : ''}`}
                     onClick={() => { if (!n.locked) onSelect(n.key); }}
                     disabled={n.locked}
                     tabIndex={isOpen ? 0 : -1}
@@ -582,7 +677,7 @@ const SidebarNav = memo(function SidebarNav({ sections, activeTab, onSelect }: {
                       ? 'Welfare is locked. An administrator must grant you access, for between 1 and 7 days.'
                       : n.countdown ? `Welfare access expires in ${n.countdown}` : n.label}
                   >
-                    <span className="rail-btn-label">{n.label}</span>
+                    <span className="rail-btn-label">{n.label}{n.dot && <span className="rail-dot" aria-label="new" />}</span>
                     {n.locked && <span className="rail-lock" aria-label="locked">&#128274;</span>}
                     {!n.locked && n.countdown && <span className="rail-countdown">{n.countdown}</span>}
                   </button>
@@ -628,6 +723,10 @@ export default function Dashboard() {
     ] },
     { id: 'activity', label: 'Activity', staff: true, items: [
       { key: 'users', label: 'Users' },
+    ] },
+    { id: 'support', label: 'Support', items: [
+      { key: 'support-pending',  label: 'Pending' },
+      { key: 'support-resolved', label: 'Resolved' },
     ] },
     { id: 'other-apps', label: 'Other Apps', page: 'other-apps', items: [
       { key: 'other-apps', label: 'Other Apps' },
@@ -947,6 +1046,70 @@ export default function Dashboard() {
     isImpersonating?: boolean; actualEmail?: string;
   };
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+
+  // ===== Support pages =====
+  const [supportIndex, setSupportIndex] = useState<SupportIndex | null>(null);
+  const [supportDate, setSupportDate] = useState<string | null>(null);
+  const [supportReport, setSupportReport] = useState<SupportReport | null>(null);
+  const [supportLoading, setSupportLoading] = useState(false);
+  const [supportError, setSupportError] = useState<string | null>(null);
+  const supportPage: 'pending' | 'resolved' | null =
+    activeTab === 'support-pending' ? 'pending' : activeTab === 'support-resolved' ? 'resolved' : null;
+
+  // Days, latest date and this person's dots. Checked at sign-in, then every 15 minutes.
+  useEffect(() => {
+    if (!authUser?.authenticated) return;
+    const load = () => fetch('/api/support')
+      .then(r => (r.ok ? r.json() : null))
+      .then((d: SupportIndex | null) => { if (d) setSupportIndex(d); })
+      .catch(() => {});
+    load();
+    const t = setInterval(load, 15 * 60 * 1000);
+    return () => clearInterval(t);
+  }, [authUser?.authenticated]);
+
+  // Each Support page opens on the latest day.
+  useEffect(() => {
+    if (supportPage && !supportDate && supportIndex?.latestDate) setSupportDate(supportIndex.latestDate);
+  }, [supportPage, supportDate, supportIndex?.latestDate]);
+
+  // The selected day's report (shown at once if already loaded this session).
+  useEffect(() => {
+    if (!supportPage || !supportDate) return;
+    const url = `/api/support?date=${supportDate}`;
+    const cached = sessionGet(url);
+    if (cached) setSupportReport(cached);
+    setSupportLoading(!cached);
+    setSupportError(null);
+    fetch(url)
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `Failed (${r.status})`);
+        setSupportReport(d);
+        sessionPut(url, d);
+      })
+      .catch((e: any) => { setSupportError(e.message || 'Failed to load'); setSupportReport(null); })
+      .finally(() => setSupportLoading(false));
+  }, [supportPage, supportDate]);
+
+  // Once a day's summary is on screen, record it as opened for this page (on
+  // every device). That clears its calendar mark, and the sidebar dot when it
+  // is the newest day.
+  useEffect(() => {
+    if (!supportPage || !supportReport || !supportIndex) return;
+    const date = supportReport.date;
+    if (date !== supportDate || supportIndex.viewed[supportPage].includes(date)) return;
+    setSupportIndex(prev => prev ? {
+      ...prev,
+      viewed: { ...prev.viewed, [supportPage]: [...prev.viewed[supportPage], date] },
+      [supportPage]: date === prev.latestDate ? false : prev[supportPage],
+    } : prev);
+    fetch('/api/support/seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page: supportPage, date }),
+    }).catch(() => {});
+  }, [supportPage, supportDate, supportReport, supportIndex]);
 
   // (Master summary effect lives here so it can wait for the signed-in user.)
   // Summary: loaded when the Master tab opens, and again after any upload,
@@ -2961,6 +3124,50 @@ export default function Dashboard() {
         .app-card-name { font-family: 'Fraunces', serif; font-size: 19px; font-weight: 700; color: #ffffff; }
         .app-card-desc { margin: 0; font-size: 13px; line-height: 1.6; color: rgba(255,255,255,0.65); }
         .app-card-url { margin-top: auto; font-size: 12px; color: rgba(107,164,255,0.9); }
+        /* Support pages and sidebar dots. Global: used by separate components. */
+        .rail-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #ff8a3d; margin-left: 8px; vertical-align: middle; box-shadow: 0 0 0 3px rgba(255,138,61,0.18); }
+        .rail-sub.has-dot { color: #ffffff; font-weight: 600; }
+        .sup-top { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 26px; }
+        .sup-cal { width: 280px; padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(107,164,255,0.2); }
+        .sup-cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; font-size: 14px; font-weight: 600; color: #ffffff; }
+        .sup-cal-nav { background: transparent; border: none; color: rgba(255,255,255,0.7); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 8px; }
+        .sup-cal-nav:hover { color: #ffffff; }
+        .sup-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+        .sup-cal-dow { text-align: center; font-size: 10px; color: rgba(255,255,255,0.4); padding-bottom: 4px; }
+        .sup-cal-day { position: relative; height: 32px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: rgba(255,255,255,0.25); font-size: 12px; cursor: default; }
+        .sup-cal-day.has { color: rgba(255,255,255,0.85); background: rgba(107,164,255,0.08); cursor: pointer; }
+        .sup-cal-day.has:hover { border-color: rgba(107,164,255,0.5); }
+        .sup-cal-day.sel { background: rgba(107,164,255,0.3); border-color: rgba(107,164,255,0.8); color: #ffffff; font-weight: 600; }
+        .sup-cal-mark { position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%); width: 5px; height: 5px; border-radius: 50%; }
+        .sup-cal-mark.pending { background: #f0c64a; }
+        .sup-cal-mark.resolved { background: #5fd38a; }
+        .sup-dayinfo { flex: 1; min-width: 240px; padding-top: 6px; }
+        .sup-dayinfo-desc { font-size: 13px; line-height: 1.5; color: rgba(255,255,255,0.6); }
+        .sup-dayinfo-title { font-family: 'Fraunces', serif; font-size: 26px; font-weight: 700; color: #ffffff; margin: 6px 0 16px; }
+        .sup-stats { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 14px; max-width: 720px; }
+        .sup-stat { padding: 16px 18px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(107,164,255,0.22); display: flex; flex-direction: column; gap: 6px; }
+        .sup-stat-label { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: rgba(255,255,255,0.55); font-weight: 600; }
+        .sup-stat-value { font-family: 'Fraunces', serif; font-size: 32px; font-weight: 700; color: #ffffff; line-height: 1.1; }
+        .sup-stat-hour { font-size: 24px; }
+        .sup-stat-trend { font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+        .sup-stat-trend.bad { color: #ff7a7a; }
+        .sup-stat-trend.good { color: #5fd38a; }
+        .sup-stat-trend.flat { color: rgba(255,255,255,0.45); }
+        .sup-stat-arrow { font-size: 16px; margin-left: 10px; vertical-align: middle; font-family: Arial, sans-serif; }
+        .sup-stat-arrow.bad { color: #ff7a7a; }
+        .sup-stat-arrow.good { color: #5fd38a; }
+        .sup-card { margin-bottom: 16px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); }
+        .sup-card.open { border-left: 4px solid #f0c64a; }
+        .sup-card.closed { border-left: 4px solid #5fd38a; }
+        .sup-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 12px 16px; font-weight: 700; font-size: 15px; color: #ffffff; }
+        .sup-card-count { flex-shrink: 0; font-weight: 400; font-size: 13px; color: rgba(255,255,255,0.55); }
+        .sup-card.open .sup-card-head { background: rgba(240,198,74,0.14); }
+        .sup-card.closed .sup-card-head { background: rgba(95,211,138,0.12); }
+        .sup-card-body { padding: 14px 16px 16px; white-space: pre-wrap; font-size: 13.5px; line-height: 1.6; color: rgba(255,255,255,0.82); }
+        .sup-core { display: block; font-size: 16px; line-height: 1.55; color: #ffffff; }
+        .sup-status { display: block; margin-top: 4px; padding: 8px 10px; border-radius: 6px; }
+        .sup-card.open .sup-status { background: rgba(240,198,74,0.14); }
+        .sup-card.closed .sup-status { background: rgba(95,211,138,0.12); }
       `}</style>
 
       <style jsx>{`
@@ -3580,6 +3787,8 @@ export default function Dashboard() {
                   locked: n.key === 'welfare' && !welfareUnlocked,
                   countdown: n.key === 'welfare' && welfareAccess?.reason === 'granted'
                     ? formatRemaining(welfareMsLeft) : '',
+                  dot: n.key === 'support-pending' ? !!supportIndex?.pending
+                     : n.key === 'support-resolved' ? !!supportIndex?.resolved : false,
                 })),
             }))
             .filter(sec => sec.items.length > 0)}
@@ -3640,6 +3849,87 @@ export default function Dashboard() {
       <div className={`with-rail ${authUser?.isImpersonating ? 'with-banner' : ''}`}>
 
       <section className="content-section">
+        {/* SUPPORT: daily AI summaries, split into Pending (STATUS_FLAG OPEN) and
+            Resolved (CLOSED). Text is shown exactly as the Apps Script wrote it. */}
+        {supportPage && (() => {
+          const items = (supportReport?.items || [])
+            .map((it, i) => ({ ...it, n: i + 1 }))
+            .filter(it => (supportPage === 'pending' ? it.isOpen : !it.isOpen));
+          return (
+            <div className="tab-panel">
+              <div className="sup-top">
+                <SupportCalendar
+                  days={supportIndex?.days || []}
+                  selected={supportDate}
+                  page={supportPage}
+                  onSelect={setSupportDate}
+                  isUnseen={(d) => !!supportIndex && !!supportIndex.since && d >= supportIndex.since
+                    && !supportIndex.viewed[supportPage].includes(d)}
+                />
+                <div className="sup-dayinfo">
+                  <div className="sup-dayinfo-desc">Support emails sent to support@gigworkersuniverse.com, summarized by AI</div>
+                  <div className="sup-dayinfo-title">{supportReport?.dayLabel || supportDate || ''}</div>
+                  {supportReport && (() => {
+                    // The server sends the day before's figures with the report.
+                    const prev = supportReport.previous || null;
+                    return (
+                      <div className="sup-stats">
+                        {/* Pending shows unresolved emails, Resolved shows resolved ones. */}
+                        <SupportStat
+                          label={supportPage === 'pending' ? 'Unresolved emails' : 'Resolved emails'}
+                          value={supportReport.items.filter(it => (supportPage === 'pending' ? it.isOpen : !it.isOpen)).length}
+                          prev={prev ? (supportPage === 'pending' ? prev.pending : prev.resolved) : null}
+                          higherIsBetter={supportPage === 'resolved'} />
+                        <SupportStat label="Total messages" value={supportReport.totalMessages}
+                          prev={prev ? prev.totalMessages : null} />
+                        <div className="sup-stat">
+                          <div className="sup-stat-label">Busiest hour</div>
+                          <div className="sup-stat-value sup-stat-hour">{supportReport.busiest}</div>
+                          <span className="sup-stat-trend flat">Most messages received</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+
+              {!supportIndex && <div className="loading-state">Loading support summaries...</div>}
+              {supportIndex && supportIndex.days.length === 0 && (
+                <div className="empty-state">No support summaries yet.</div>
+              )}
+              {supportLoading && <div className="loading-state">Loading summary...</div>}
+              {supportError && <div className="error-state">Error: {supportError}</div>}
+              {!supportLoading && !supportError && supportReport && items.length === 0 && (
+                <div className="empty-state">
+                  {supportReport.items.length === 0 ? 'No support emails for this day.'
+                    : supportPage === 'pending' ? 'No pending cases on this day.' : 'No resolved cases on this day.'}
+                </div>
+              )}
+              {!supportLoading && !supportError && items.map(it => {
+                const text = it.summary.replace(/^\s*STATUS_FLAG:.*$/im, '').trim();
+                const at = text.search(/Current status:/i);
+                // "Core issue" (up to the first blank line) is shown larger. Text is unchanged.
+                const coreEnd = /^Core issue:/i.test(text) ? text.indexOf('\n\n') : -1;
+                const coreLen = coreEnd > 0 && (at < 0 || coreEnd < at) ? coreEnd : 0;
+                return (
+                  <div key={it.n} className={`sup-card ${it.isOpen ? 'open' : 'closed'}`}>
+                    <div className="sup-card-head">
+                      <span>{it.subject}</span>
+                      <span className="sup-card-count">{it.msgCount} {it.msgCount === 1 ? 'Message' : 'Messages'}</span>
+                    </div>
+                    <div className="sup-card-body">
+                      {coreLen > 0 && <span className="sup-core">{text.slice(0, coreLen)}</span>}
+                      {/* The core block already ends its line, so skip one newline after it. */}
+                      {at >= 0 ? text.slice(coreLen ? coreLen + 1 : 0, at) : text.slice(coreLen ? coreLen + 1 : 0)}
+                      {at >= 0 && <span className="sup-status">{text.slice(at)}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+
         {/* OTHER APPS: links to other Gig Workers Universe apps, for everyone. */}
         {activeTab === 'other-apps' && (
           <div className="tab-panel">
