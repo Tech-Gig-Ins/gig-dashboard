@@ -22,7 +22,7 @@ import {
 import type { Session } from '@/lib/auth';
 import { readGrants, activeGrantFor } from '@/lib/auth';
 import { CONSULTANT_ROWS, REPORT_MONTH as BUILT_IN_CONSULTANT_MONTH } from '@/app/data/consultantData';
-import { detectMonthYear } from '@/lib/fileMonth';
+import { allRecordsMonth, classifyFile } from '@/lib/fileMonth';
 
 const bedrock = new BedrockRuntimeClient({
   region: process.env.BEDROCK_REGION || process.env.MY_AWS_REGION || 'us-east-1',
@@ -142,10 +142,12 @@ function toolList(ctx: Ctx): Tool[] {
           city: { type: 'string' }, coverageTier: { type: 'string' } } } }),
     t('search_all_records', 'Search every carrier file (All Records) for a member name. Returns, for each file that matched, its column headings and the full matching rows (up to 20 per file).',
       { query: { type: 'string', description: 'Name or part of a name, 2+ characters' } }, ['query']),
-    t('list_files', 'List carrier files in All Records, newest first, with when each arrived and which month it is for. Filters: received_month = the month the file ARRIVED (its upload date, New York time); file_month = the month the file is FOR, read from its name exactly as All Records groups files; contains = text in the name. Returns every match (up to 200) and the total.',
+    t('list_files', 'List carrier files in All Records exactly as the page shows them, newest first: name, carrier label (e.g. Cassena Remittance, Cassena Credits, Refresh), the month block it sits under, when it arrived, and whether it is INCLUDED (counted in the calculations) for that month. Filters: received_month = month it ARRIVED; file_month = the month block it sits under on All Records; contains = text in the name; label = carrier label; included = true for only included files, false for only not-included. Returns every match (up to 200) and the total.',
       { received_month: { ...month, description: 'Month the file arrived, "October 2026"' },
-        file_month: { ...month, description: 'Month the file is for, "October 2026"' },
-        contains: { type: 'string', description: 'Optional text the file name must contain, e.g. "Cassena"' } }),
+        file_month: { ...month, description: 'Month block on All Records, "October 2026"' },
+        contains: { type: 'string', description: 'Optional text the file name must contain, e.g. "Cassena"' },
+        label: { type: 'string', description: 'Optional carrier label or part of it, e.g. "Cassena Remittance" or "remittance"' },
+        included: { type: 'boolean', description: 'Optional: true = only included files, false = only files that are not included' } }),
     t('get_support', 'Daily AI support email summaries. Without a date: the days available with pending and resolved counts. With a date: that day\'s cases.',
       { date: { type: 'string', description: 'Optional day, YYYY-MM-DD' } }),
     t('find_consultant', 'Find who the consultant of a group is, or which groups a consultant handles. Searches every sheet of the Consultant Monthly report and the Consultant Directory (latest month unless one is given), plus the built-in consultant list. Use this first for any consultant question.',
@@ -434,25 +436,36 @@ async function runTool(ctx: Ctx, name: string, input: any): Promise<{ result: Re
       if (!Array.isArray(files)) return { result: files };
       const nyMonth = (iso: string) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'long', year: 'numeric' }).format(new Date(iso));
       const nyDay = (iso: string) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(iso));
-      const forMonth = (name: string) => { const d = detectMonthYear(name); return d ? `${MONTHS_LONG[d.month]} ${d.year}` : null; };
       const same = (a: string | null, b: unknown) => !!a && a.toLowerCase() === String(b || '').trim().toLowerCase();
       const c = String(input?.contains || '').toLowerCase();
-      const all = files.map((f: any) => ({
-        key: f.key, filename: f.filename,
-        carrier: (String(f.key).match(/^carrier=([^/]+)\//) || [])[1] || '',
-        received: nyDay(f.lastModified), receivedMonth: nyMonth(f.lastModified), fileMonth: forMonth(f.filename),
-        _t: String(f.lastModified),
-      }));
-      const hits = all.filter((f: any) =>
+      const lab = String(input?.label || '').toLowerCase();
+      const all = files.map((f: any) => {
+        const m = allRecordsMonth(f.filename, f.lastModified);
+        return {
+          key: f.key, filename: f.filename,
+          label: classifyFile(f.filename) === 'unknown' ? 'Unclassified' : classifyFile(f.filename),
+          fileMonth: `${MONTHS_LONG[m.month]} ${m.year}`,
+          received: nyDay(f.lastModified), receivedMonth: nyMonth(f.lastModified),
+          _mf: `${m.year}-${String(m.month + 1).padStart(2, '0')}`, _t: String(f.lastModified),
+        };
+      });
+      let hits = all.filter((f: any) =>
         (!input?.received_month || same(f.receivedMonth, input.received_month)) &&
         (!input?.file_month || same(f.fileMonth, input.file_month)) &&
-        (!c || String(f.filename).toLowerCase().includes(c)))
+        (!c || String(f.filename).toLowerCase().includes(c)) &&
+        (!lab || f.label.toLowerCase().includes(lab)))
         .sort((a: any, b: any) => b._t.localeCompare(a._t));
+      // Included or not, from each month's Include list (the same one the buttons use).
+      const months = [...new Set(hits.map((f: any) => f._mf))].slice(0, 24) as string[];
+      const lists = await Promise.all(months.map(m => api(ctx, `/api/manifest?month=${m}`)));
+      const inc = new Map(months.map((m, i) => [m, new Set<string>(lists[i]?.included || [])]));
+      hits = hits.map((f: any) => ({ ...f, included: inc.has(f._mf) ? inc.get(f._mf)!.has(f.key) : null }));
+      if (typeof input?.included === 'boolean') hits = hits.filter((f: any) => f.included === input.included);
       return { result: shrink({
         filters: { received_month: input?.received_month || null, file_month: input?.file_month || null, contains: input?.contains || null },
         totalFilesInAllRecords: all.length,
         count: hits.length,
-        files: hits.slice(0, 200).map(({ _t, receivedMonth, ...f }: any) => f),
+        files: hits.slice(0, 200).map(({ _t, _mf, receivedMonth, ...f }: any) => f),
         ...(hits.length > 200 ? { note: `Showing the newest 200 of ${hits.length}.` } : {}),
       }) };
     }
@@ -759,6 +772,23 @@ function systemPrompt(ctx: Ctx, page: string): string {
     '  need the user\'s Confirm. When several changes are needed (for example two uploads then generate), propose',
     '  them all in order in one reply; the user can confirm them one by one or all at once.',
     '',
+    'Dashboard words (what people mean):',
+    '- "included", "counted", "ticked", "in the calculations": the file is Included on All Records for its month (it',
+    '  feeds Master and the Consultant report). "excluded", "not included", "not counted": the opposite. Use',
+    '  list_files with included=true or false.',
+    '- "remittance" / "credits": carrier labels (Cassena Remittance, Cassena Credits, and so on); use list_files label.',
+    '- "this month", "last month", "next month": relative to today\'s date above. "received", "came in", "arrived":',
+    '  by arrival date (received_month); "October files", "files for October": the month block (file_month).',
+    '- "active", "terminated", "new": the three Master tables. "members", "clients", "enrollees": people in Master.',
+    '  "group", "company", "employer": the group column.',
+    '- "consultant", "agent", "broker": consultants (Consultant report). "PEPM", "earnings", "commission": consultant pay.',
+    '- "pending", "open", "unresolved" / "resolved", "closed", "answered": the two Support pages.',
+    '- "underpaid", "overpaid", "declined", "rejected", "batched": Billing report sheets and statuses.',
+    '  "approved": the billing chat file chosen as the month\'s report.',
+    '- "unclassified": PDF and ZIP files (Admin). "View as", "proxy": acting as another account.',
+    '- If the user\'s words narrow things to exactly ONE item, act on it straight away (download, open, propose).',
+    '  Ask only when two or more still fit, and then list just those.',
+    '',
     'Scope:',
     '- You only help with this dashboard: its pages, its data and the actions listed in your tools. If asked for',
     '  anything else (writing code, general knowledge, essays, maths, chit-chat beyond a greeting), reply in one',
@@ -960,7 +990,8 @@ function describeLookup(name: string, input: any, result: any): TraceItem {
     case 'master_overview': label = 'Read Master totals'; break;
     case 'list_files': {
       const f = [input?.received_month ? `received in ${input.received_month}` : '', input?.file_month ? `for ${input.file_month}` : '',
-        input?.contains ? `containing "${input.contains}"` : ''].filter(Boolean).join(', ');
+        input?.contains ? `containing "${input.contains}"` : '', input?.label ? `labelled ${input.label}` : '',
+        typeof input?.included === 'boolean' ? (input.included ? 'included only' : 'not included only') : ''].filter(Boolean).join(', ');
       label = `Listed All Records files${f ? ` ${f}` : ''}` + (r && typeof r.count === 'number' ? `: ${r.count} found` : '');
       break;
     }

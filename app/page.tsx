@@ -845,7 +845,7 @@ function AssistantPanel({ open, onClose, page, firstName, fullName, onNavigate, 
     <aside className={`asst-panel ${open ? 'open' : ''} ${wide ? 'wide' : ''}`} aria-hidden={!open}>
       <div className="asst-head">
         <div>
-          <div className="asst-title">Assistant</div>
+          <div className="asst-title">AI Assistant</div>
           <div className="asst-sub">Asks the dashboard for you. Changes always need your Confirm.</div>
         </div>
         <div className="asst-head-btns">
@@ -4314,7 +4314,7 @@ export default function Dashboard() {
       {/* Assistant: floating button and the chat panel on the right. */}
       {authUser?.authenticated && !assistantOpen && (
         <button className={`asst-fab ${authUser.isImpersonating ? 'with-banner' : ''}`} onClick={() => setAssistantOpen(true)}
-                aria-label="Open the assistant" title="Ask the assistant">
+                aria-label="Open the AI Assistant" title="AI Assistant">
           <span aria-hidden="true">&#10022;</span>
         </button>
       )}
