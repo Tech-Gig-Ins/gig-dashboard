@@ -131,6 +131,11 @@ async function describe(req: Request): Promise<{ action: string; detail: string 
     return null;
   }
 
+  if (path === '/api/assistant') {
+    const b = await json();
+    const last = Array.isArray(b?.history) ? [...b.history].reverse().find((t: any) => t?.role === 'user') : null;
+    return { action: 'Asked the assistant', detail: `Asked "${cut(last?.text, 300)}"` };
+  }
   if (path === '/api/master/query') {
     const b = await json();
     const search = String(b?.search || '').trim();
@@ -187,7 +192,7 @@ async function describe(req: Request): Promise<{ action: string; detail: string 
   if (path === '/api/master/upload') return { action: 'Uploaded files to All Records', detail: 'Uploaded carrier files' };
   if (path === '/api/consultant/upload') return { action: 'Uploaded a consultant file', detail: 'Uploaded a consultant report file' };
   if (path === '/api/billing/upload-sources') return { action: 'Uploaded billing source files', detail: 'Uploaded CardConnect or Refresh files' };
-  if (path === '/api/support/seen' || path === '/api/master/upload-check') return null;
+  if (path === '/api/support/seen' || path === '/api/master/upload-check' || path === '/api/assistant-log') return null;
   return { action: 'Other action', detail: `Used ${path.replace('/api/', '')} (${m})` };
 }
 

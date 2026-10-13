@@ -71,7 +71,7 @@ type SearchResponse = {
   results: SearchMatch[];
 };
 
-type TabKey = 'master' | 'all-info' | 'unclassified' | 'consultant' | 'consultant-directory' | 'billing' | 'welfare' | 'users' | 'pa-monitor' | 'support-pending' | 'support-resolved' | 'other-apps';
+type TabKey = 'master' | 'all-info' | 'unclassified' | 'consultant' | 'consultant-directory' | 'billing' | 'welfare' | 'users' | 'pa-monitor' | 'ai-monitor' | 'support-pending' | 'support-resolved' | 'other-apps';
 
 type MemberRecord = {
   memberName: string;
@@ -604,6 +604,351 @@ function SupportCalendar({ days, selected, page, onSelect, isUnseen }: {
   );
 }
 
+// ===== Assistant =====
+// Chat panel that slides in from the right. Answers come from /api/assistant
+// (Claude on Amazon Bedrock, running as the signed-in person). Page changes
+// are done straight away; data changes are shown as a card and only happen
+// when the person clicks Confirm, using the normal API.
+type AssistantAction =
+  | { type: 'navigate'; page: string; month?: string; date?: string; sheet?: string; search?: string; filters?: Record<string, string> }
+  | { type: 'download'; kind: 'key' | 'consultant_sheet' | 'welfare'; key?: string; filename?: string; month?: string; consultant?: string }
+  | { type: 'confirm'; tool: string; input: any; summary: string };
+type AssistantMsg = { role: 'user' | 'assistant'; text: string; actions?: AssistantAction[]; trace?: { label: string; ok: boolean }[] };
+const ASSISTANT_PAGE_NAMES: Record<string, string> = {
+  'master': 'Dashboard > Master', 'all-info': 'Dashboard > All Records', 'unclassified': 'Dashboard > Unclassified Files',
+  'consultant': 'Consultant Report > Monthly', 'consultant-directory': 'Consultant Report > Directory',
+  'billing': 'Billing > CardPointe_Refresh', 'welfare': 'Billing > Welfare', 'users': 'Activity > Users',
+  'pa-monitor': 'Activity > PA Monitor', 'ai-monitor': 'Monitor > AI Assistant', 'support-pending': 'Support > Pending', 'support-resolved': 'Support > Resolved',
+  'other-apps': 'Other Apps',
+};
+
+// Renders the assistant's text: paragraphs, **bold**, bullet and numbered
+// lists, and | tables |. Builds React elements only (no raw HTML), so text
+// from the model can never inject markup.
+function renderInline(text: string, key: string): React.ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
+    part.startsWith('**') && part.endsWith('**') && part.length > 4
+      ? <strong key={`${key}-${i}`}>{part.slice(2, -2)}</strong>
+      : <span key={`${key}-${i}`}>{part}</span>);
+}
+function splitRow(line: string): string[] {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+}
+function AssistantMarkdown({ text }: { text: string }) {
+  const lines = text.replace(/\r/g, '').split('\n');
+  const blocks: React.ReactNode[] = [];
+  let i = 0, k = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // Code block: ``` ... ``` shown as-is, keeping indentation.
+    if (/^\s*```/.test(line)) {
+      const code: string[] = [];
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i]); i++; }
+      i++;
+      blocks.push(<pre key={k++} className="asst-code"><code>{code.join('\n')}</code></pre>);
+      continue;
+    }
+    // Table: a | row | followed by a | --- | separator.
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
+      const head = splitRow(line);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(splitRow(lines[i])); i++; }
+      blocks.push(
+        <div key={k++} className="asst-table-wrap">
+          <table className="asst-table">
+            <thead><tr>{head.map((h, j) => <th key={j}>{renderInline(h, `h${j}`)}</th>)}</tr></thead>
+            <tbody>{rows.map((r, ri) => <tr key={ri}>{head.map((_, j) => <td key={j}>{renderInline(r[j] || '', `c${ri}-${j}`)}</td>)}</tr>)}</tbody>
+          </table>
+        </div>);
+      continue;
+    }
+    // Lists: "- item", "* item" or "1. item".
+    if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
+      const ordered = /^\s*\d+\.\s+/.test(line);
+      const items: string[] = [];
+      while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*([-*]|\d+\.)\s+/, '')); i++; }
+      const Tag = ordered ? 'ol' : 'ul';
+      blocks.push(<Tag key={k++} className="asst-list-md">{items.map((it, j) => <li key={j}>{renderInline(it, `l${k}-${j}`)}</li>)}</Tag>);
+      continue;
+    }
+    if (line.trim() === '') { i++; continue; }
+    // Paragraph: consecutive plain lines.
+    const para: string[] = [];
+    while (i < lines.length && lines[i].trim() !== '' && !/^\s*\|.*\|\s*$/.test(lines[i]) && !/^\s*([-*]|\d+\.)\s+/.test(lines[i]) && !/^\s*```/.test(lines[i])) { para.push(lines[i]); i++; }
+    blocks.push(<p key={k++}>{para.map((pl, j) => <span key={j}>{j > 0 && <br />}{renderInline(pl, `p${k}-${j}`)}</span>)}</p>);
+  }
+  return <div className="asst-md">{blocks}</div>;
+}
+
+function AssistantPanel({ open, onClose, page, firstName, fullName, onNavigate, onDownload, onBulkInclude, onChanged }: {
+  open: boolean; onClose: () => void; page: string; firstName: string; fullName: string;
+  onNavigate: (a: { page: string; month?: string; date?: string; sheet?: string; search?: string; filters?: Record<string, string> }) => void;
+  // Starts a download the same way the page's Download buttons do.
+  onDownload: (a: { kind: string; key?: string; filename?: string; month?: string; consultant?: string }) => void;
+  // Include all / Exclude all for a month, using the page's own button logic. Returns how many files changed.
+  onBulkInclude: (month: string, included: boolean) => Promise<number>;
+  // Told what changed, so the page refreshes only that (never a full reset).
+  onChanged: (tool: string, input: any, response: any) => void;
+}) {
+  const [msgs, setMsgs] = useState<AssistantMsg[]>([]);
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [cards, setCards] = useState<Record<string, { state: 'running' | 'done' | 'failed' | 'cancelled'; note?: string }>>({});
+  const [wide, setWide] = useState(false);
+  // The attached file stays in the browser; the assistant only sees its name and
+  // size. It is uploaded on Confirm, to the destination the assistant proposed.
+  const [attachments, setAttachments] = useState<File[]>([]);
+  // One id per chat panel session, so the Monitor can group a conversation.
+  const convId = useRef(`${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+  const logOutcome = (change: string, result: 'confirmed' | 'cancelled' | 'failed', detail = '') => {
+    fetch('/api/assistant-log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ convId: convId.current, change, result, detail }) }).catch(() => {});
+  };
+  const fileRef = useRef<HTMLInputElement>(null);
+  const sizeText = (n: number) => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+  const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { listRef.current?.scrollTo({ top: 1e9, behavior: 'smooth' }); }, [msgs, busy, cards]);
+  useEffect(() => { if (open) setTimeout(() => inputRef.current?.focus(), 200); }, [open]);
+
+  async function send(text: string) {
+    const typed = text.trim();
+    if ((!typed && attachments.length === 0) || busy) return;
+    const q = (typed || 'I attached files.') + attachments.map(f => `\n[Attached file: ${f.name}, ${sizeText(f.size)}]`).join('');
+    const history = [...msgs.map(m => ({ role: m.role, text: m.text })), { role: 'user' as const, text: q }];
+    setMsgs(prev => [...prev, { role: 'user', text: q }]);
+    setInput('');
+    setBusy(true);
+    try {
+      const res = await fetch('/api/assistant', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ history, page, convId: convId.current }),
+      });
+      const d = await res.json().catch(() => ({}));
+      const actions: AssistantAction[] = Array.isArray(d.actions) ? d.actions : [];
+      const trace = Array.isArray(d.trace) ? d.trace : [];
+      setMsgs(prev => [...prev, { role: 'assistant', text: d.reply || d.error || `Something went wrong (${res.status}).`, actions, trace }]);
+      actions.filter(a => a.type === 'navigate').forEach(a => onNavigate(a as any));
+      actions.filter(a => a.type === 'download').forEach(a => onDownload(a as any));
+    } catch {
+      setMsgs(prev => [...prev, { role: 'assistant', text: 'I could not reach the server. Please try again.' }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirm(id: string, a: Extract<AssistantAction, { type: 'confirm' }>): Promise<boolean> {
+    setCards(prev => ({ ...prev, [id]: { state: 'running' } }));
+    let uploadedName = '';
+    try {
+      let res: Response;
+      if (a.tool === 'grant_welfare_access') {
+        res = await fetch('/api/access-grants', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: a.input?.email, days: Number(a.input?.days) }) });
+      } else if (a.tool === 'revoke_welfare_access') {
+        res = await fetch(`/api/access-grants?email=${encodeURIComponent(a.input?.email || '')}`, { method: 'DELETE' });
+      } else if (a.tool === 'upload_attachment') {
+        // Same requests as the page's own upload controls.
+        const i = a.input || {};
+        const attachment = attachments.length === 1 && !i.file ? attachments[0]
+          : attachments.find(f => f.name === i.file) || attachments.find(f => f.name.toLowerCase().includes(String(i.file || '').toLowerCase()) && i.file);
+        if (!attachment) throw new Error(`the attached file ${i.file ? `"${i.file}" ` : ''}is not attached any more. Attach it again and ask once more`);
+        uploadedName = attachment.name;
+        const fd = new FormData();
+        if (i.destination === 'all_records') {
+          const [mn, yr] = String(i.month).split(' ');
+          fd.append('file', attachment);
+          fd.append('canonicalLabel', i.label);
+          fd.append('month', String(['January','February','March','April','May','June','July','August','September','October','November','December'].indexOf(mn)));
+          fd.append('year', yr);
+          if (i.if_exists === 'add_new' || i.if_exists === 'replace') fd.append('override', 'true');
+          if (i.if_exists === 'replace' && i.replace_key) fd.append('overrideKey', i.replace_key);
+          res = await fetch('/api/master/upload', { method: 'POST', body: fd });
+        } else if (i.destination === 'billing_chat') {
+          fd.append('month', i.month); fd.append('name', fullName || 'Dashboard user');
+          fd.append('comments', String(i.message || '')); fd.append('file', attachment);
+          res = await fetch('/api/billing/updates', { method: 'POST', body: fd });
+        } else if (i.destination === 'billing_sources') {
+          fd.append('month', i.month); fd.append(i.source === 'refresh' ? 'refresh' : 'cardconnect', attachment);
+          res = await fetch('/api/billing/upload-sources', { method: 'POST', body: fd });
+        } else {
+          fd.append('month', i.month); fd.append('files', attachment);
+          res = await fetch('/api/consultant/upload', { method: 'POST', body: fd });
+        }
+        if (res.status === 409) {
+          const d409 = await res.json().catch(() => ({}));
+          const names = (d409.existingKeys || []).map((k: string) => k.split('/').pop()).join(', ');
+          throw new Error(`a file for that carrier and month already exists (${names}). Tell me to replace it or to keep both`);
+        }
+      } else if (a.tool === 'set_month_inclusion') {
+        const n = await onBulkInclude(String(a.input?.month), !!a.input?.included);
+        res = new Response(JSON.stringify({ changed: n }), { status: 200 });
+      } else if (a.tool === 'post_billing_message') {
+        const fd = new FormData();
+        fd.append('month', a.input?.month); fd.append('name', fullName || 'Dashboard user'); fd.append('comments', String(a.input?.message || ''));
+        res = await fetch('/api/billing/updates', { method: 'POST', body: fd });
+      } else if (a.tool === 'approve_billing_file') {
+        res = await fetch('/api/billing/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: a.input?.key, month: a.input?.month }) });
+      } else if (a.tool === 'remove_billing_approval') {
+        res = await fetch(`/api/billing/approve?month=${encodeURIComponent(a.input?.month || '')}`, { method: 'DELETE' });
+      } else if (a.tool === 'generate_billing_report') {
+        res = await fetch('/api/billing/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ month: a.input?.month }) });
+      } else if (a.tool === 'generate_consultant_report') {
+        res = await fetch('/api/consultant/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ curr_month: a.input?.month }) });
+      } else if (a.tool === 'move_file') {
+        // Same request as the Move dialog on All Records.
+        res = await fetch('/api/files/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(a.input) });
+      } else {
+        res = await fetch('/api/manifest', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ month: a.input?.month, key: a.input?.key, included: !!a.input?.included }) });
+      }
+      const d = await res.json().catch(() => ({}));
+      if (a.tool === 'move_file' && res.status === 409) {
+        throw new Error(`a file named "${String(d.conflictKey || '').split('/').pop()}" already exists. Ask me to move it again and replace that file if you want to`);
+      }
+      if (!res.ok) throw new Error(d.error || `Failed (${res.status})`);
+      if (a.tool === 'move_file' && d.deleteError) {
+        throw new Error(`copied, but the original could not be removed (${d.deleteError}), so both files now exist`);
+      }
+      setCards(prev => ({ ...prev, [id]: { state: 'done' } }));
+      setMsgs(prev => [...prev, { role: 'assistant', text: `Done: ${a.summary}${a.tool === 'set_month_inclusion' ? ` (${(d as any).changed ?? 0} file(s) changed)` : ''}.` }]);
+      if (a.tool === 'upload_attachment' && uploadedName) setAttachments(prev => prev.filter(f => f.name !== uploadedName));
+      onChanged(a.tool, a.input, d);
+      logOutcome(a.summary, 'confirmed');
+      return true;
+    } catch (e: any) {
+      setCards(prev => ({ ...prev, [id]: { state: 'failed', note: e.message } }));
+      setMsgs(prev => [...prev, { role: 'assistant', text: `That did not go through: ${e.message}` }]);
+      logOutcome(a.summary, 'failed', e.message || '');
+      return false;
+    }
+  }
+
+  // Confirm every open card of one reply, in order; stops at the first failure.
+  async function confirmAll(i: number, list: AssistantAction[]) {
+    for (let j = 0; j < list.length; j++) {
+      const a = list[j];
+      if (a.type !== 'confirm' || cards[`${i}-${j}`]) continue;
+      const ok = await confirm(`${i}-${j}`, a);
+      if (!ok) break;
+    }
+  }
+
+  const suggestions = ['How many active members are there?', 'Open Support > Pending', 'Search Master for Murphy'];
+  return (
+    <aside className={`asst-panel ${open ? 'open' : ''} ${wide ? 'wide' : ''}`} aria-hidden={!open}>
+      <div className="asst-head">
+        <div>
+          <div className="asst-title">Assistant</div>
+          <div className="asst-sub">Asks the dashboard for you. Changes always need your Confirm.</div>
+        </div>
+        <div className="asst-head-btns">
+          <button className="asst-close" onClick={() => setWide(w => !w)} title={wide ? 'Narrow the panel' : 'Widen the panel for tables'}
+                  aria-label={wide ? 'Narrow the panel' : 'Widen the panel'}>{wide ? '\u21E5' : '\u21E4'}</button>
+          <button className="asst-close" onClick={onClose} aria-label="Close assistant">&#10005;</button>
+        </div>
+      </div>
+      <div className="asst-list" ref={listRef}>
+        {msgs.length === 0 && (
+          <div className="asst-welcome">
+            <p>Hi {firstName || 'there'}. Ask me about members, files, support emails or reports, or tell me which page to open.</p>
+            <div className="asst-suggest">
+              {suggestions.map(sug => <button key={sug} onClick={() => send(sug)}>{sug}</button>)}
+            </div>
+          </div>
+        )}
+        {msgs.map((m, i) => (
+          <div key={i} className={`asst-msg ${m.role}`}>
+            <div className="asst-bubble">{m.role === 'assistant' ? <AssistantMarkdown text={m.text} /> : m.text}</div>
+            {/* What the assistant looked up for this answer. No lines means it answered without checking. */}
+            {m.role === 'assistant' && m.trace && (
+              <div className="asst-trace">
+                {m.trace.length === 0
+                  ? <span className="asst-trace-none">No lookups for this answer</span>
+                  : m.trace.filter(t => !t.label.startsWith('Opened ')).map((t, j) => (
+                      <span key={j} className={t.ok ? '' : 'bad'}>{'\u2192'} {t.label}</span>
+                    ))}
+              </div>
+            )}
+            {(m.actions || []).filter(a => a.type === 'confirm').length > 1 &&
+              (m.actions || []).some((a, j) => a.type === 'confirm' && !cards[`${i}-${j}`]) && (
+              <button className="asst-confirm-all" onClick={() => confirmAll(i, m.actions || [])}>
+                Confirm all {(m.actions || []).filter((a, j) => a.type === 'confirm' && !cards[`${i}-${j}`]).length}, in order
+              </button>
+            )}
+            {(m.actions || []).map((a, j) => {
+              const id = `${i}-${j}`;
+              if (a.type === 'download') {
+                return <div key={id} className="asst-chip">Downloading {a.filename || (a.kind === 'consultant_sheet' ? `${a.consultant} sheet, ${a.month}` : a.kind === 'welfare' ? `Welfare, ${a.month}` : 'file')}</div>;
+              }
+              if (a.type === 'navigate') {
+                return <div key={id} className="asst-chip">Opened {ASSISTANT_PAGE_NAMES[a.page] || a.page}{a.month ? `, ${a.month}` : ''}{a.date ? `, ${a.date}` : ''}{a.sheet ? `, sheet ${a.sheet}` : ''}{typeof a.search === 'string' ? (a.search ? `, searched "${a.search}"` : ', search cleared') : ''}</div>;
+              }
+              const c = cards[id];
+              return (
+                <div key={id} className="asst-confirm">
+                  <div className="asst-confirm-label">Needs your confirmation</div>
+                  <div className="asst-confirm-text">{a.summary}</div>
+                  {!c && (
+                    <div className="asst-confirm-btns">
+                      <button className="asst-yes" onClick={() => confirm(id, a)}>Confirm</button>
+                      <button className="asst-no" onClick={() => {
+                        setCards(prev => ({ ...prev, [id]: { state: 'cancelled' } }));
+                        logOutcome(a.summary, 'cancelled');
+                        setMsgs(prev => [...prev, { role: 'assistant', text: `Cancelled: ${a.summary}.` }]);
+                      }}>Cancel</button>
+                    </div>
+                  )}
+                  {c?.state === 'running' && <div className="asst-confirm-state asst-thinking"><span className="asst-spinner" aria-hidden="true" />Working...</div>}
+                  {c?.state === 'done' && <div className="asst-confirm-state ok">{'\u2713'} Done</div>}
+                  {c?.state === 'failed' && <div className="asst-confirm-state bad">Failed: {c.note}</div>}
+                  {c?.state === 'cancelled' && <div className="asst-confirm-state">Cancelled</div>}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+        {busy && (
+          <div className="asst-msg assistant">
+            <div className="asst-bubble asst-thinking"><span className="asst-spinner" aria-hidden="true" />Thinking...</div>
+          </div>
+        )}
+      </div>
+      {attachments.map(f => (
+        <div key={f.name} className="asst-attach-chip">
+          <span>{'\u{1F4CE}'} {f.name} ({sizeText(f.size)})</span>
+          <button onClick={() => setAttachments(prev => prev.filter(x => x !== f))} aria-label={`Remove ${f.name}`}>&#10005;</button>
+        </div>
+      ))}
+      <form className="asst-input" onSubmit={(e) => { e.preventDefault(); send(input); }}>
+        <input ref={fileRef} type="file" multiple hidden
+               onChange={(e) => {
+                 const picked = Array.from(e.target.files || []);
+                 if (picked.length) setAttachments(prev => [...prev.filter(p => !picked.some(n => n.name === p.name)), ...picked]);
+                 e.target.value = '';
+               }} />
+        <button type="button" className="asst-clip" onClick={() => fileRef.current?.click()}
+                title="Attach a file" aria-label="Attach a file">{'\u{1F4CE}'}</button>
+        <textarea
+          ref={inputRef}
+          value={input}
+          rows={2}
+          placeholder="Ask about the dashboard..."
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); } }}
+        />
+        <button type="submit" disabled={busy || (!input.trim() && attachments.length === 0)}>Send</button>
+      </form>
+    </aside>
+  );
+}
+
 // ===== Other Apps =====
 // Other apps run by Gig Workers Universe. Each icon is loaded from the app's
 // own site, trying a large icon first, then favicon.ico, then the first letter.
@@ -718,7 +1063,7 @@ export default function Dashboard() {
   // closed. "staff" means Admin or Platform Admin. Members never see staff
   // items, and the server refuses them anyway; hiding is for clarity only.
   // Welfare is the one exception: a Member with an active grant sees it.
-  type NavItem = { key: TabKey; label: string; staff?: boolean; adminOnly?: boolean };
+  type NavItem = { key: TabKey; label: string; staff?: boolean; adminOnly?: boolean; paOnly?: boolean };
   const NAV_SECTIONS: Array<{ id: string; label: string; staff?: boolean; page?: TabKey; items: NavItem[] }> = [
     { id: 'dashboard', label: 'Dashboard', items: [
       { key: 'master',       label: 'Master' },
@@ -736,6 +1081,10 @@ export default function Dashboard() {
     { id: 'activity', label: 'Activity', staff: true, items: [
       { key: 'users', label: 'Users' },
       { key: 'pa-monitor', label: 'PA Monitor', adminOnly: true },
+    ] },
+    // Platform Admin only: hidden from everyone else, and in View as tabs.
+    { id: 'monitor', label: 'Monitor', items: [
+      { key: 'ai-monitor', label: 'AI Assistant', paOnly: true },
     ] },
     { id: 'support', label: 'Support', items: [
       { key: 'support-pending',  label: 'Pending' },
@@ -1086,6 +1435,43 @@ export default function Dashboard() {
       .then((d: { events: PaEvent[] }) => setPaEvents(d.events))
       .catch((e: any) => setPaError(e.message || 'Failed to load'));
   }, [activeTab, paDate]);
+
+  // ===== Monitor > AI Assistant (Platform Admin only) =====
+  type AiLogEntry = {
+    kind: 'exchange' | 'outcome'; at: string; user: string; actingAs: string | null; convId: string;
+    page?: string; question?: string; answer?: string; lookups?: string[]; proposed?: string[]; opened?: string[];
+    ms?: number; error?: string | null; change?: string; result?: 'confirmed' | 'cancelled' | 'failed'; detail?: string;
+  };
+  const [aiDays, setAiDays] = useState<string[] | null>(null);
+  const [aiDate, setAiDate] = useState<string | null>(null);
+  const [aiEntries, setAiEntries] = useState<AiLogEntry[] | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiPerson, setAiPerson] = useState('');
+  const [aiText, setAiText] = useState('');
+  const isRealPa = !!(authUser?.isPlatformAdmin && !authUser?.isImpersonating);
+  useEffect(() => {
+    if (activeTab !== 'ai-monitor' || !isRealPa) return;
+    fetch('/api/assistant-log')
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`Failed (${r.status})`))))
+      .then((d: { days: string[] }) => { setAiDays(d.days); setAiDate(prev => prev && d.days.includes(prev) ? prev : d.days[0] || null); })
+      .catch((e: any) => setAiError(e.message || 'Failed to load'));
+  }, [activeTab, isRealPa]);
+  useEffect(() => {
+    if (activeTab !== 'ai-monitor' || !aiDate || !isRealPa) return;
+    setAiEntries(null);
+    fetch(`/api/assistant-log?date=${aiDate}`)
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`Failed (${r.status})`))))
+      .then((d: { entries: AiLogEntry[] }) => setAiEntries(d.entries))
+      .catch((e: any) => setAiError(e.message || 'Failed to load'));
+  }, [activeTab, aiDate, isRealPa]);
+
+  // ===== Assistant =====
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  // A sheet the assistant asked for. Applied once that page's report has loaded,
+  // because changing the month reloads the report first.
+  const [assistantSheet, setAssistantSheet] = useState<{ page: string; sheet: string; month?: string } | null>(null);
+  // A Welfare Excel the assistant asked for: saved once that month's figures load.
+  const [pendingWelfareDownload, setPendingWelfareDownload] = useState<string | null>(null);
 
   // ===== Support pages =====
   const [supportIndex, setSupportIndex] = useState<SupportIndex | null>(null);
@@ -1546,9 +1932,12 @@ export default function Dashboard() {
   // Report state - rich Excel data with formatting
   // 
   const [billingReport, setBillingReport] = useState<BillingReport | null>(null);
+  // Which month billingReport belongs to, so a tab choice waits for the right month.
+  const [billingReportFor, setBillingReportFor] = useState<string>('');
   const [billingLoading, setBillingLoading] = useState(false);
   const [billingError, setBillingError] = useState<string | null>(null);
   const [billingActiveSheet, setBillingActiveSheet] = useState<string>('');
+
   // Approval passcode modal
   const [approvalError, setApprovalError] = useState<string | null>(null);
   // Which billing action is in flight: the S3 key being approved, '__reset__'
@@ -1831,6 +2220,29 @@ export default function Dashboard() {
       setConsultantOpError(e.message || 'Download failed');
     } finally {
       setConsultantDownloading(false);
+    }
+  }
+
+  // Same as downloadConsultantSheet, for a month the assistant names (which may
+  // not be the month selected on the page).
+  async function assistantConsultantSheet(month: string, consultant: string) {
+    try {
+      const res = await fetch(`/api/consultant/download-sheet?month=${encodeURIComponent(month)}&consultant=${encodeURIComponent(consultant)}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Download failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objUrl;
+      a.download = `${consultant} Report ${month}.xlsx`.replace(/[\\/:*?"<>|]/g, '-');
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(objUrl);
+    } catch (e: any) {
+      setConsultantOpError(e.message || 'Download failed');
     }
   }
 
@@ -2322,10 +2734,11 @@ export default function Dashboard() {
     if (cachedBilling) {
       // Shown at once; refreshed below.
       setBillingReport(cachedBilling);
-      if (cachedBilling.sheets && cachedBilling.sheets.length > 0 &&
-          !cachedBilling.sheets.some(sh => sh.name === billingActiveSheet)) {
-        setBillingActiveSheet(cachedBilling.sheets[0].name);
-      }
+      setBillingReportFor(billingSelectedMonth);
+      // Keep the current tab if it exists. Uses the latest value (not a copy
+      // from when this load started), so a newer choice is never undone.
+      const names = (cachedBilling.sheets || []).map(sh => sh.name);
+      if (names.length) setBillingActiveSheet(prev => (names.includes(prev) ? prev : names[0]));
     }
     setBillingLoading(!cachedBilling);
     setBillingError(null);
@@ -2336,12 +2749,12 @@ export default function Dashboard() {
       })
       .then((data: BillingReport) => {
         setBillingReport(data);
+        setBillingReportFor(billingSelectedMonth);
         sessionPut(billingUrl, data);
-        // Default to the first sheet if the previously selected one no longer exists
-        if (data.sheets && data.sheets.length > 0) {
-          const hasCurrent = data.sheets.some(s => s.name === billingActiveSheet);
-          if (!hasCurrent) setBillingActiveSheet(data.sheets[0].name);
-        }
+        // Default to the first sheet only if the current one no longer exists
+        // (latest value, so a newer choice is never undone).
+        const names = (data.sheets || []).map(sh => sh.name);
+        if (names.length) setBillingActiveSheet(prev => (names.includes(prev) ? prev : names[0]));
         setBillingLoading(false);
       })
       .catch((e: any) => {
@@ -2358,6 +2771,45 @@ export default function Dashboard() {
     setBillingSelectedMonth(label);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [billingSelectedMonthIdx, billingSelectedYear]);
+
+  // Assistant asked for the Welfare Excel: save it once that month's figures load.
+  useEffect(() => {
+    if (!pendingWelfareDownload || welfareLoading || welfareData?.month !== pendingWelfareDownload) return;
+    downloadWelfareExcel();
+    setPendingWelfareDownload(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingWelfareDownload, welfareData, welfareLoading]);
+
+  // Assistant asked for a sheet: pick the best match once the report is loaded.
+  // Exact name first, then a name containing the words asked for (ignoring
+  // case, spaces and underscores), so "underpaid" finds "Q3_Underpaid".
+  useEffect(() => {
+    if (!assistantSheet) return;
+    const norm = (x: string) => x.toLowerCase().replace(/[\s_\-]+/g, '');
+    const pick = (names: string[]) => {
+      const want = norm(assistantSheet.sheet);
+      return names.find(n => n === assistantSheet.sheet) || names.find(n => norm(n) === want) || names.find(n => norm(n).includes(want));
+    };
+    if (assistantSheet.page === 'billing') {
+      // Wait for the requested month's report (not the one shown before the switch).
+      const month = assistantSheet.month || billingSelectedMonth;
+      if (billingLoading || billingReportFor !== month || !billingReport?.sheets?.length) return;
+      const hit = pick(billingReport.sheets.map(sh => sh.name));
+      if (hit) setBillingActiveSheet(hit);
+      setAssistantSheet(null);
+    } else if (assistantSheet.page === 'consultant' || assistantSheet.page === 'consultant-directory') {
+      const wb = assistantSheet.page === 'consultant' ? consultantReportView?.report : consultantReportView?.directory;
+      const month = assistantSheet.month || consultantSelectedMonth;
+      if (consultantReportLoading || consultantReportView?.month !== month || !wb?.sheets?.length) return;
+      const hit = pick(wb.sheets.map((sh: any) => sh.name));
+      if (hit) {
+        if (assistantSheet.page === 'consultant') setConsultantActiveReportSheet(hit);
+        else setConsultantActiveDirectorySheet(hit);
+      }
+      setAssistantSheet(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assistantSheet, billingReport, billingReportFor, billingLoading, billingSelectedMonth, consultantReportView, consultantReportLoading, consultantSelectedMonth]);
 
   // Load consultant tab data whenever the tab is activated or the month changes.
   useEffect(() => {
@@ -3208,6 +3660,26 @@ export default function Dashboard() {
         .sup-status { display: block; margin-top: 4px; padding: 8px 10px; border-radius: 6px; }
         .sup-card.open .sup-status { background: rgba(240,198,74,0.14); }
         .sup-card.closed .sup-status { background: rgba(95,211,138,0.12); }
+        /* Monitor > AI Assistant */
+        .sup-stats.aim-stats { grid-template-columns: repeat(4, minmax(140px, 1fr)); max-width: 960px; }
+        .aim-filters { display: flex; gap: 10px; justify-content: center; margin: -6px 0 18px; flex-wrap: wrap; }
+        .aim-search { min-width: 280px; padding: 8px 12px; border-radius: 8px; background: rgba(255,255,255,0.05); border: 1px solid rgba(107,164,255,0.35); color: #ffffff; font-size: 14px; }
+        .aim-conv { margin: 0 auto 18px; max-width: 980px; border-radius: 12px; border: 1px solid rgba(107,164,255,0.25); background: rgba(255,255,255,0.03); overflow: hidden; }
+        .aim-conv-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; background: rgba(107,164,255,0.1); color: #ffffff; font-size: 13.5px; }
+        .aim-viewas { color: #c9a3ff; font-weight: 400; }
+        .aim-conv-meta { color: rgba(255,255,255,0.6); font-size: 12.5px; }
+        .aim-ex { padding: 14px 16px; border-top: 1px solid rgba(255,255,255,0.06); display: flex; flex-direction: column; gap: 8px; }
+        .aim-ex-meta { font-size: 11.5px; color: rgba(255,255,255,0.45); }
+        .aim-q { align-self: flex-end; max-width: 80%; padding: 9px 13px; border-radius: 12px; background: #2f6fe0; color: #ffffff; font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .aim-a { max-width: 92%; padding: 10px 13px; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); color: rgba(255,255,255,0.9); font-size: 13.5px; line-height: 1.55; overflow-wrap: anywhere; }
+        .aim-a.bad { border-color: rgba(255,122,122,0.5); }
+        .aim-err { color: #ff9a9a; font-size: 12px; }
+        .aim-change { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12.5px; color: rgba(255,255,255,0.85); padding: 8px 10px; border-radius: 8px; background: rgba(240,198,74,0.07); border: 1px solid rgba(240,198,74,0.3); }
+        .aim-badge { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; }
+        .aim-badge.confirmed { background: rgba(95,211,138,0.18); color: #5fd38a; }
+        .aim-badge.cancelled { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.6); }
+        .aim-badge.failed { background: rgba(255,122,122,0.18); color: #ff7a7a; }
+        .aim-badge.open { background: rgba(240,198,74,0.16); color: #f0c64a; }
         /* PA Monitor */
         .pam-daybar { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0 0 18px; }
         .pam-dayselect { padding: 8px 12px; border-radius: 8px; background: rgba(255,255,255,0.05); border: 1px solid rgba(107,164,255,0.35); color: #ffffff; font-size: 14px; }
@@ -3216,6 +3688,77 @@ export default function Dashboard() {
         .pam-table tr.pam-session td { background: rgba(201,163,255,0.08); }
         .pam-table tr.pam-inferred td { font-style: italic; color: rgba(255,255,255,0.55); }
         .pam-table td.pam-detail { white-space: normal !important; min-width: 260px; max-width: 420px; line-height: 1.5; color: rgba(255,255,255,0.75); }
+        /* Assistant. Global because AssistantPanel is its own component. */
+        .asst-fab { position: fixed; right: 24px; bottom: 24px; z-index: 80; width: 56px; height: 56px; border-radius: 50%; border: 1px solid rgba(107,164,255,0.6); background: linear-gradient(135deg, #2f6fe0, #6b4fd8); color: #ffffff; font-size: 24px; cursor: pointer; box-shadow: 0 8px 28px rgba(20,60,160,0.45); transition: transform 0.15s ease; }
+        .asst-fab:hover { transform: scale(1.06); }
+        .asst-fab.with-banner { bottom: 62px; }
+        .asst-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 90; width: 400px; max-width: 100vw; display: flex; flex-direction: column; background: #0b1a36; border-left: 1px solid rgba(107,164,255,0.25); box-shadow: -12px 0 40px rgba(0,0,0,0.45); transform: translateX(105%); transition: transform 0.22s ease; }
+        .asst-panel.open { transform: translateX(0); }
+        .asst-wrap.with-banner .asst-panel { bottom: 38px; }
+        .asst-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 18px 18px 14px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+        .asst-title { font-family: 'Fraunces', serif; font-size: 20px; font-weight: 700; color: #ffffff; }
+        .asst-sub { font-size: 12px; color: rgba(255,255,255,0.55); margin-top: 2px; }
+        .asst-close { background: transparent; border: none; color: rgba(255,255,255,0.6); font-size: 18px; cursor: pointer; padding: 2px 6px; }
+        .asst-close:hover { color: #ffffff; }
+        .asst-list { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+        .asst-welcome p { margin: 0 0 12px; font-size: 14px; line-height: 1.55; color: rgba(255,255,255,0.8); }
+        .asst-suggest { display: flex; flex-direction: column; gap: 8px; }
+        .asst-suggest button { text-align: left; padding: 9px 12px; border-radius: 10px; background: rgba(107,164,255,0.08); border: 1px solid rgba(107,164,255,0.25); color: rgba(255,255,255,0.85); font-size: 13px; cursor: pointer; }
+        .asst-suggest button:hover { background: rgba(107,164,255,0.16); }
+        .asst-msg { display: flex; flex-direction: column; gap: 6px; }
+        .asst-msg.user { align-items: flex-end; }
+        .asst-msg.assistant { align-items: flex-start; }
+        .asst-bubble { max-width: 88%; padding: 10px 13px; border-radius: 14px; font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .asst-msg.user .asst-bubble { background: #2f6fe0; color: #ffffff; border-bottom-right-radius: 4px; }
+        .asst-msg.assistant .asst-bubble { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.9); border: 1px solid rgba(255,255,255,0.08); border-bottom-left-radius: 4px; }
+        .asst-chip { font-size: 12px; color: #9cc1ff; background: rgba(107,164,255,0.1); border: 1px solid rgba(107,164,255,0.3); border-radius: 999px; padding: 4px 10px; }
+        .asst-confirm { width: 88%; box-sizing: border-box; padding: 14px 16px; border-radius: 12px; background: rgba(240,198,74,0.08); border: 1px solid rgba(240,198,74,0.45); }
+        .asst-confirm-label { font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(240,198,74,0.9); font-weight: 700; margin-bottom: 6px; }
+        .asst-confirm-text { font-size: 13px; line-height: 1.5; color: #ffffff; font-weight: 600; margin-bottom: 14px; overflow-wrap: anywhere; }
+        .asst-confirm-btns { display: flex; gap: 10px; }
+        .asst-yes, .asst-no { flex: 1; padding: 7px 10px; border-radius: 8px; font-size: 12.5px; cursor: pointer; }
+        .asst-yes { background: #2f9e5b; border: 1px solid #3fbf72; color: #ffffff; font-weight: 600; }
+        .asst-no { background: transparent; border: 1px solid rgba(255,255,255,0.25); color: rgba(255,255,255,0.8); }
+        .asst-confirm-state { font-size: 12.5px; color: rgba(255,255,255,0.65); }
+        .asst-confirm-state.ok { color: #5fd38a; font-weight: 600; }
+        .asst-confirm-state.bad { color: #ff7a7a; }
+        .asst-typing { display: inline-flex; gap: 5px; align-items: center; }
+        .asst-typing span { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.6); animation: asst-dot 1s infinite ease-in-out; }
+        .asst-typing span:nth-child(2) { animation-delay: 0.15s; }
+        .asst-typing span:nth-child(3) { animation-delay: 0.3s; }
+        @keyframes asst-dot { 0%, 80%, 100% { opacity: 0.25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
+        .asst-panel.wide { width: min(880px, 92vw); }
+        .asst-trace { display: flex; flex-direction: column; gap: 3px; max-width: 88%; font-size: 11px; line-height: 1.4; color: rgba(255,255,255,0.45); padding-left: 4px; overflow-wrap: anywhere; }
+        .asst-trace .bad { color: #ff9a9a; }
+        .asst-trace-none { font-style: italic; color: rgba(255,200,120,0.7); }
+        .asst-head-btns { display: flex; gap: 2px; }
+        .asst-thinking { display: inline-flex; align-items: center; gap: 10px; color: rgba(255,255,255,0.75); }
+        .asst-spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(107,164,255,0.25); border-top-color: #6ba4ff; border-right-color: #9b7bff; animation: asst-spin 0.8s linear infinite; flex-shrink: 0; }
+        @keyframes asst-spin { to { transform: rotate(360deg); } }
+        .asst-msg.assistant .asst-bubble { white-space: normal; }
+        .asst-md p { margin: 0 0 8px; }
+        .asst-md p:last-child { margin-bottom: 0; }
+        .asst-md strong { color: #ffffff; font-weight: 700; }
+        .asst-list-md { margin: 4px 0 8px; padding-left: 20px; }
+        .asst-confirm-all { align-self: flex-start; padding: 7px 12px; border-radius: 8px; background: #2f9e5b; border: 1px solid #3fbf72; color: #ffffff; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+        .asst-attach-chip + .asst-attach-chip { margin-top: 6px; }
+        .asst-attach-chip { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 12px; padding: 7px 10px; border-radius: 8px; background: rgba(107,164,255,0.1); border: 1px solid rgba(107,164,255,0.3); font-size: 12px; color: rgba(255,255,255,0.85); }
+        .asst-attach-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .asst-attach-chip button { background: transparent; border: none; color: rgba(255,255,255,0.6); cursor: pointer; }
+        .asst-input .asst-clip { padding: 0 10px; background: rgba(255,255,255,0.06); border: 1px solid rgba(107,164,255,0.3); font-size: 16px; }
+        .asst-code { margin: 6px 0 8px; padding: 10px 12px; border-radius: 8px; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08); overflow-x: auto; font-size: 12px; line-height: 1.5; white-space: pre; }
+        .asst-list-md li { margin: 3px 0; }
+        .asst-table-wrap { overflow-x: auto; margin: 6px 0 8px; border-radius: 8px; border: 1px solid rgba(107,164,255,0.25); }
+        .asst-table { border-collapse: collapse; font-size: 12px; min-width: 100%; }
+        .asst-table th { position: sticky; top: 0; background: rgba(107,164,255,0.16); color: #ffffff; font-weight: 600; text-align: left; padding: 7px 10px; white-space: nowrap; }
+        .asst-table td { padding: 6px 10px; border-top: 1px solid rgba(255,255,255,0.07); color: rgba(255,255,255,0.88); white-space: nowrap; }
+        .asst-table tr:nth-child(even) td { background: rgba(255,255,255,0.025); }
+        .asst-msg.assistant .asst-bubble:has(.asst-table) { max-width: 100%; }
+        .asst-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid rgba(255,255,255,0.08); }
+        .asst-input textarea { flex: 1; resize: none; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid rgba(107,164,255,0.3); color: #ffffff; font-family: 'Inter', sans-serif; font-size: 13.5px; outline: none; }
+        .asst-input textarea:focus { border-color: rgba(107,164,255,0.7); }
+        .asst-input button { padding: 0 16px; border-radius: 10px; background: #2f6fe0; border: none; color: #ffffff; font-weight: 600; cursor: pointer; }
+        .asst-input button:disabled { opacity: 0.4; cursor: default; }
       `}</style>
 
       <style jsx>{`
@@ -3768,6 +4311,103 @@ export default function Dashboard() {
       <div className="grain" />
 
 
+      {/* Assistant: floating button and the chat panel on the right. */}
+      {authUser?.authenticated && !assistantOpen && (
+        <button className={`asst-fab ${authUser.isImpersonating ? 'with-banner' : ''}`} onClick={() => setAssistantOpen(true)}
+                aria-label="Open the assistant" title="Ask the assistant">
+          <span aria-hidden="true">&#10022;</span>
+        </button>
+      )}
+      {authUser?.authenticated && (
+        <div className={authUser.isImpersonating ? 'asst-wrap with-banner' : 'asst-wrap'}>
+          <AssistantPanel
+            open={assistantOpen}
+            onClose={() => setAssistantOpen(false)}
+            page={activeTab}
+            firstName={(authUser.fullName || '').split(' ')[0]}
+            fullName={authUser.fullName || ''}
+            onNavigate={(a) => {
+              const tab = a.page as TabKey;
+              if (a.month) {
+                if (tab === 'welfare') { setWelfareMonth(a.month); setWelfareData(null); }
+                if (tab === 'consultant' || tab === 'consultant-directory') setConsultantSelectedMonth(a.month);
+                if (tab === 'billing') {
+                  const [mn, yr] = a.month.split(' ');
+                  const idx = MONTH_NAMES_LONG.indexOf(mn);
+                  if (idx >= 0 && Number(yr)) { setBillingSelectedMonthIdx(idx); setBillingSelectedYear(Number(yr)); }
+                }
+              }
+              if (a.date && (tab === 'support-pending' || tab === 'support-resolved')) setSupportDate(a.date);
+              // Master filters, applied like the filter drawer's Apply button.
+              if (a.filters && tab === 'master') {
+                const next = { ...emptyFilter, ...a.filters } as FilterState;
+                setDraftFilters(next); setAppliedFilters(next);
+              }
+              // Type into the page's search box and run it, like pressing Enter.
+              if (typeof a.search === 'string') {
+                const q = a.search.trim();
+                if (tab === 'master') { setMasterSearchInput(q); setMasterSearch(q); }
+                if (tab === 'all-info') {
+                  setSearchInput(q);
+                  if (q.length >= 2) setSearchQuery(q); else { setSearchQuery(''); setSearchResults(null); setSearchError(null); }
+                }
+              }
+              if (a.sheet && (tab === 'billing' || tab === 'consultant' || tab === 'consultant-directory')) {
+                setAssistantSheet({ page: tab, sheet: a.sheet, month: a.month });
+              }
+              setActiveTab(tab);
+            }}
+            onDownload={(a) => {
+              if (a.kind === 'key' && a.key) handleDownload(a.key, a.filename || a.key.split('/').pop() || 'download');
+              else if (a.kind === 'consultant_sheet' && a.month && a.consultant) assistantConsultantSheet(a.month, a.consultant);
+              else if (a.kind === 'welfare' && a.month) {
+                // Open Welfare on that month; the Excel is saved once its figures have loaded.
+                setWelfareMonth(a.month); setWelfareData(null); setActiveTab('welfare'); setPendingWelfareDownload(a.month);
+              }
+            }}
+            onBulkInclude={async (month, included) => {
+              // Every non PDF/ZIP file shown under that month on All Records, like Include all / Exclude all.
+              // Same calculation as the month block's own Include all button.
+              const block = Object.values(grouped).find(g => manifestMonthKey(g.year, g.month) === month);
+              if (!block) throw new Error(`no month block for ${month} on All Records`);
+              const keys = Object.values(block.systems).flat().filter(f => !isExcludedByExtension(f.filename)).map(f => f.key);
+              if (!manifestMonthsLoaded.has(month)) await loadManifest(month);
+              const changing = keys.filter(k => isIncluded(month, k) !== included).length;
+              await setIncludedBulk(month, keys, included);
+              return changing;
+            }}
+            onChanged={(tool, input, response) => {
+              // Refresh only what the change touched, like the page's own
+              // buttons. Never clear everything: that briefly showed 0 included.
+              if (tool === 'set_file_inclusion') {
+                setIncludedByMonth(prev => ({ ...prev, [input.month]: new Set<string>(response?.included || []) }));
+                setMasterData(null);
+                setMasterSummary(null);
+              } else if (tool === 'move_file') {
+                const from = detectMonthYear(String(input.sourceKey || '').split('/').pop() || '');
+                const months = new Set<string>([`${input.year}-${String(Number(input.month) + 1).padStart(2, '0')}`]);
+                if (from) months.add(`${from.year}-${String(from.month + 1).padStart(2, '0')}`);
+                months.forEach(m => { loadManifest(m); });
+                loadAllFilesData();
+                setMasterData(null);
+                setMasterSummary(null);
+              } else if (tool === 'upload_attachment') {
+                if (input.destination === 'all_records') loadAllFilesData();
+                else setBillingRefetchTick(t => t + 1);
+              } else if (tool === 'grant_welfare_access' || tool === 'revoke_welfare_access') {
+                loadWelfareAccess();
+              } else if (tool === 'post_billing_message' || tool === 'approve_billing_file' || tool === 'remove_billing_approval' || tool === 'generate_billing_report') {
+                setBillingRefetchTick(t => t + 1);
+                if (input?.month === billingSelectedMonth) loadUpdates();
+              } else if (tool === 'generate_consultant_report') {
+                fetchConsultantMonths();
+                if (input?.month === consultantSelectedMonth) fetchConsultantReport(input.month);
+              }
+            }}
+          />
+        </div>
+      )}
+
       {authUser?.isImpersonating && (
         <div className="imp-banner">
           <span className="imp-banner-dot" />
@@ -3826,7 +4466,8 @@ export default function Dashboard() {
               page: sec.page,
               items: sec.items
                 .filter(n =>
-                  n.adminOnly ? !!authUser?.isAdmin
+                  n.paOnly ? !!(authUser?.isPlatformAdmin && !authUser?.isImpersonating)
+                  : n.adminOnly ? !!authUser?.isAdmin
                   : n.key === 'welfare' ? (canManage || welfareUnlocked)
                   : (!n.staff || canManage))
                 .map(n => ({
@@ -3898,6 +4539,101 @@ export default function Dashboard() {
       <div className={`with-rail ${authUser?.isImpersonating ? 'with-banner' : ''}`}>
 
       <section className="content-section">
+        {/* MONITOR > AI ASSISTANT: every question and answer, by every user.
+            Platform Admin only; the server refuses everyone else. */}
+        {activeTab === 'ai-monitor' && isRealPa && (() => {
+          const fmtDay = (d: string) => new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+          const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit' }) + ' ET';
+          const i = aiDays && aiDate ? aiDays.indexOf(aiDate) : -1;
+          const all = aiEntries || [];
+          const people = [...new Set(all.map(e => e.user))].sort();
+          const text = aiText.trim().toLowerCase();
+          const exchanges = all.filter(e => e.kind === 'exchange'
+            && (!aiPerson || e.user === aiPerson)
+            && (!text || `${e.question} ${e.answer}`.toLowerCase().includes(text)));
+          const outcomes = all.filter(e => e.kind === 'outcome');
+          // Group by conversation, in the order each conversation started.
+          const convs: { id: string; user: string; actingAs: string | null; items: AiLogEntry[] }[] = [];
+          for (const e of exchanges) {
+            const id = `${e.user}|${e.convId}`;
+            let c = convs.find(x => x.id === id);
+            if (!c) { c = { id, user: e.user, actingAs: e.actingAs, items: [] }; convs.push(c); }
+            c.items.push(e);
+          }
+          const proposedCount = exchanges.reduce((n, e) => n + (e.proposed?.length || 0), 0);
+          const errorCount = exchanges.filter(e => e.error).length;
+          const outcomeFor = (e: AiLogEntry, change: string) =>
+            outcomes.find(o => o.convId === e.convId && o.user === e.user && o.change === change && o.at >= e.at);
+          return (
+            <div className="tab-panel">
+              <p className="roles-intro">
+                Every question asked to the AI assistant and its answer, by every user, with the date and time, what it looked up and
+                which changes were confirmed. Only the Platform Admin (PA) can see this page; users never see it.
+              </p>
+              {aiError && <div className="error-state">Error: {aiError}</div>}
+              {aiDays && aiDays.length === 0 && <div className="empty-state">No assistant conversations have been recorded yet.</div>}
+              {aiDays && aiDays.length > 0 && aiDate && (
+                <>
+                  <div className="pam-daybar">
+                    <button className="sup-cal-nav" disabled={i >= aiDays.length - 1} onClick={() => setAiDate(aiDays[i + 1])} aria-label="Earlier day">&#8249;</button>
+                    <select className="pam-dayselect" value={aiDate} onChange={e => setAiDate(e.target.value)}>
+                      {aiDays.map(d => <option key={d} value={d}>{fmtDay(d)}</option>)}
+                    </select>
+                    <button className="sup-cal-nav" disabled={i <= 0} onClick={() => setAiDate(aiDays[i - 1])} aria-label="Later day">&#8250;</button>
+                  </div>
+                  <div className="aim-filters">
+                    <select className="pam-dayselect" value={aiPerson} onChange={e => setAiPerson(e.target.value)}>
+                      <option value="">Everyone</option>
+                      {people.map(p => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                    <input className="aim-search" value={aiText} onChange={e => setAiText(e.target.value)} placeholder="Search questions and answers..." />
+                  </div>
+                  <div className="sup-stats pam-stats aim-stats">
+                    <div className="sup-stat"><div className="sup-stat-label">Questions</div><div className="sup-stat-value">{exchanges.length}</div></div>
+                    <div className="sup-stat"><div className="sup-stat-label">People</div><div className="sup-stat-value">{new Set(exchanges.map(e => e.user)).size}</div></div>
+                    <div className="sup-stat"><div className="sup-stat-label">Changes proposed</div><div className="sup-stat-value">{proposedCount}</div></div>
+                    <div className="sup-stat"><div className="sup-stat-label">Errors</div><div className="sup-stat-value">{errorCount}</div></div>
+                  </div>
+                  {!aiEntries && <div className="loading-state">Loading conversations...</div>}
+                  {aiEntries && convs.length === 0 && <div className="empty-state">No questions match.</div>}
+                  {convs.map(c => (
+                    <div key={c.id} className="aim-conv">
+                      <div className="aim-conv-head">
+                        <span><b>{c.user}</b>{c.actingAs ? <span className="aim-viewas"> viewing as {c.actingAs}</span> : null}</span>
+                        <span className="aim-conv-meta">{fmtTime(c.items[0].at)} &middot; {c.items.length} question{c.items.length === 1 ? '' : 's'}</span>
+                      </div>
+                      {c.items.map((e, n) => (
+                        <div key={n} className="aim-ex">
+                          <div className="aim-ex-meta">{fmtTime(e.at)} &middot; on {ASSISTANT_PAGE_NAMES[e.page || ''] || e.page || 'unknown page'}{typeof e.ms === 'number' ? ` \u00b7 ${(e.ms / 1000).toFixed(1)} s` : ''}</div>
+                          <div className="aim-q">{e.question}</div>
+                          <div className={`aim-a ${e.error ? 'bad' : ''}`}><AssistantMarkdown text={e.answer || ''} /></div>
+                          {e.error && <div className="aim-err">Error: {e.error}</div>}
+                          {(e.lookups?.length || e.opened?.length) ? (
+                            <div className="asst-trace">
+                              {(e.lookups || []).filter(l => !l.startsWith('Opened ')).map((l, j) => <span key={`l${j}`}>{'\u2192'} {l}</span>)}
+                              {(e.opened || []).map((l, j) => <span key={`o${j}`}>{'\u2192'} {l}</span>)}
+                            </div>
+                          ) : null}
+                          {(e.proposed || []).map((p, j) => {
+                            const o = outcomeFor(e, p);
+                            return (
+                              <div key={`p${j}`} className="aim-change">
+                                <span>{p}</span>
+                                <span className={`aim-badge ${o?.result || 'open'}`}>{o ? o.result : 'not confirmed'}</span>
+                                {o?.result === 'failed' && o.detail ? <span className="aim-err">{o.detail}</span> : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          );
+        })()}
+
         {/* PA MONITOR: what the Platform Admin did while using View as. */}
         {activeTab === 'pa-monitor' && authUser?.isAdmin && (() => {
           const fmtDay = (d: string) => new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
