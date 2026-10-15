@@ -224,13 +224,14 @@ async function toBuffer(body: any): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-type Parsed = { rowCount: number; distinct: number; amount: number; amountColumn: string };
+type Parsed = { rowCount: number; amount: number; amountColumn: string };
 
 // Reads one file and returns its figures.
 //   amount   sum over EVERY data row - this is real money, and a member on two
 //            plans genuinely pays twice
-//   distinct unique people, via the master dashboard's identityKey
-//   rowCount raw data rows, which is what credit files use
+//   rowCount every named data row. This is Enrolled for remittances (no
+//            de-duplication: a person listed twice counts twice, by decision
+//            of the operator, October 2026) and the Credit Count for credits.
 async function parseFile(key: string, groupFilter?: string, excludeGroup?: string): Promise<Parsed> {
   const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
   const buf = await toBuffer(obj.Body as any);
@@ -255,7 +256,7 @@ async function parseFile(key: string, groupFilter?: string, excludeGroup?: strin
       hIdx = i; headers = h; break;
     }
   }
-  if (hIdx === -1) return { rowCount: 0, distinct: 0, amount: 0, amountColumn: '(no header found)' };
+  if (hIdx === -1) return { rowCount: 0, amount: 0, amountColumn: '(no header found)' };
 
   let amtIdx = findCol(headers, AMOUNT_COLS, true);
   if (amtIdx === -1) amtIdx = findCol(headers, AMOUNT_COLS, false);
@@ -270,7 +271,6 @@ async function parseFile(key: string, groupFilter?: string, excludeGroup?: strin
   const shop = findCol(headers, ['l426 shop'], true);
   const clientGroup = findCol(headers, ['client group', 'group name'], true);
 
-  const seen = new Set<string>();
   let rowCount = 0, amount = 0;
 
   for (let i = hIdx + 1; i < rows.length; i++) {
@@ -292,12 +292,10 @@ async function parseFile(key: string, groupFilter?: string, excludeGroup?: strin
 
     rowCount++;
     amount += toNumber(cell(r, amtIdx));
-    seen.add(`${normName(name)}|${normName(group)}`);
   }
 
   return {
     rowCount,
-    distinct: seen.size,
     amount,
     amountColumn: amtIdx >= 0 ? headers[amtIdx] : '(none found)',
   };
@@ -439,7 +437,8 @@ export async function GET(req: NextRequest) {
           const cred = credKey ? await parseFile(credKey) : null;
 
           const amount = rem?.amount ?? 0;
-          const enrolled = rem?.distinct ?? 0;
+          // Enrolled = every named row of the remittance (no de-duplication).
+          const enrolled = rem?.rowCount ?? 0;
           const capFee = enrolled * capRate;
           // Credits files store their values as NEGATIVES. The template's formula
           // (=C-E-F+H) expects F to be a positive magnitude, so a negative F would

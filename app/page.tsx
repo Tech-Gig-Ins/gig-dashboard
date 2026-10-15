@@ -1865,7 +1865,7 @@ export default function Dashboard() {
       [`Remittances: ${welfareData.month}   |   Credits: ${welfareData.creditMonth || ''}`], [],
       ['Remittances: files Included in All Records for this month.'],
       [`Credits: PRIOR month (${welfareData.creditMonth || 'previous month'}), any Include status, .pdf/.zip excluded.`],
-      ['Remittance Amount sums every row. Enrolled counts distinct members after de-duplication.'],
+      ['Remittance Amount sums every row. Enrolled counts every member row (no de-duplication).'],
       ['Cap Fee = Enrolled x fee rate. Credit Fees = Credit Count x fee rate (raw rows).'],
       ['NYP Wire = Remittance Amount - GIG Cap Fee - Credit Amount + Credit Fees.'],
       ['Rates: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131,'],
@@ -6193,7 +6193,7 @@ export default function Dashboard() {
                 <li><strong>Why the two rules differ.</strong> Some carriers ship several remittance files for one month; Cassena has Invoice, Vision and the main remittance. Inclusion is what identifies the correct one. Credits are often left un-included so they do not disturb the Consultant Report, so requiring inclusion would zero them out.</li>
                 <li><strong>Month matching</strong> reads the month and year from the filename, the same way the All Records tab groups files.</li>
                 <li><strong>Remittance Amount</strong> sums the amount column across <strong>every row</strong> of the remittance file. A member on two plans pays two premiums, so this is deliberately not de-duplicated.</li>
-                <li><strong>Enrolled</strong> counts <strong>distinct members</strong> after de-duplication, matching how the Master Dashboard counts people rather than plan enrolments. It is normally lower than the row count.</li>
+                <li><strong>Enrolled</strong> counts <strong>every member row</strong> of the remittance file, with no de-duplication: someone listed twice counts twice. Rows without a member name (totals and adjustment lines) are not counted.</li>
                 <li><strong>GIG Cap Fee</strong> = Enrolled &times; fee rate.</li>
                 <li><strong>Credit Amount</strong> sums the amount column of the matching credits file, taken as a <strong>positive magnitude</strong>. Credits files store their values as negatives, and the formula already subtracts them, so a negative here would add to the wire instead of reducing it. <strong>Credit Count</strong> is a <strong>raw row count</strong> with no de-duplication. Rows with no credits file show zero.</li>
                 <li><strong>Credit Fees</strong> = Credit Count &times; fee rate.</li>
