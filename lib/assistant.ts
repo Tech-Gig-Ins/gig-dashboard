@@ -753,7 +753,7 @@ function systemPrompt(ctx: Ctx, page: string): string {
     '- Dashboard > All Records: carrier files by month (what arrived, what each is for), search across every file,',
     '  preview, download, Include / Include all / Exclude all, Move, Upload. Tools: list_files, search_all_records,',
     '  read_file, download, set_file_inclusion, set_month_inclusion, move_file, upload_attachment.',
-    '- Dashboard > Unclassified Files (Admin): PDF and ZIP files; download only.',
+    '- Dashboard > Unclassified Files: PDF and ZIP files; download only.',
     '- Consultant Report > Monthly and > Directory: per-month workbooks; upload inputs, check the upload checklist,',
     '  generate, read sheets, download the workbook or one consultant\'s tab. Tools: find_consultant,',
     '  get_consultant_report, get_consultant_upload_status, generate_consultant_report, download, upload_attachment.',
@@ -785,7 +785,7 @@ function systemPrompt(ctx: Ctx, page: string): string {
     '- "pending", "open", "unresolved" / "resolved", "closed", "answered": the two Support pages.',
     '- "underpaid", "overpaid", "declined", "rejected", "batched": Billing report sheets and statuses.',
     '  "approved": the billing chat file chosen as the month\'s report.',
-    '- "unclassified": PDF and ZIP files (Admin). "View as", "proxy": acting as another account.',
+    '- "unclassified": PDF and ZIP files. "View as", "proxy": acting as another account.',
     '- If the user\'s words narrow things to exactly ONE item, act on it straight away (download, open, propose).',
     '  Ask only when two or more still fit, and then list just those.',
     '',
@@ -907,7 +907,7 @@ export async function runAssistant(opts: {
   }
   const pages = Object.keys(PAGE_NAMES).filter(p =>
     p === 'ai-monitor' ? !!(s.isPlatformAdmin && !s.isImpersonating)
-    : p === 'unclassified' || p === 'pa-monitor' ? isAdmin
+    : p === 'pa-monitor' ? isAdmin
     : p === 'users' ? canManage
     : p === 'welfare' ? (canManage || welfareOk)
     : true);

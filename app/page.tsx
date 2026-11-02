@@ -1068,7 +1068,7 @@ export default function Dashboard() {
     { id: 'dashboard', label: 'Dashboard', items: [
       { key: 'master',       label: 'Master' },
       { key: 'all-info',     label: 'All Records' },
-      { key: 'unclassified', label: 'Unclassified Files', adminOnly: true },
+      { key: 'unclassified', label: 'Unclassified Files' },
     ] },
     { id: 'consultant', label: 'Consultant Report', items: [
       { key: 'consultant',           label: 'Monthly' },
@@ -1868,10 +1868,19 @@ export default function Dashboard() {
       ['Remittance Amount sums every row. Enrolled counts every member row (no de-duplication).'],
       ['Cap Fee = Enrolled x fee rate. Credit Fees = Credit Count x fee rate (raw rows).'],
       ['NYP Wire = Remittance Amount - GIG Cap Fee - Credit Amount + Credit Fees.'],
-      ['Rates: Cassena 94, Tpa.com 131, GIG Credit Cards 120, Hartford 54, GWU3 131,'],
-      ['       BDSB 131, Northstead 142, Refresh 142, EP6 142, PIOPAC 142.'],
+      // Rates as actually applied to this month's rows (cap fee / credit fee).
+      [`Rates applied: ${welfareData.rows.map(r => r.capRate === r.creditRate
+        ? `${r.label} ${r.capRate}` : `${r.label} ${r.capRate} / ${r.creditRate}`).join(', ')}.`],
       ['Hartford = rows of Corechoice T3 whose Group is HARTFORD FUNDING, LTD.'],
       [], header, ...body,
+      // Exactly which file each row was read from, so a wrong file is visible.
+      [], ['Files used'],
+      ...welfareData.rows.filter(r => r.mapped).map(r => [
+        r.label,
+        `Remittance: ${r.remittanceFile || 'none found'}` +
+          ((r as any).ambiguous?.length ? `  (WARNING: ${(r as any).ambiguous.length} included files share this label: ${(r as any).ambiguous.join(', ')})` : '') +
+          (r.creditFile ? `   |   Credits: ${r.creditFile}` : ''),
+      ]),
     ];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws['!cols'] = [{ wch: 26 }, { wch: 18 }, { wch: 11 }, { wch: 14 },
@@ -4796,9 +4805,9 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* UNCLASSIFIED FILES: .pdf and .zip, Admin only.
+        {/* UNCLASSIFIED FILES: .pdf and .zip, for everyone.
             /api/files leaves them out for Members and /api/download refuses them. */}
-        {activeTab === 'unclassified' && authUser?.isAdmin && (() => {
+        {activeTab === 'unclassified' && authUser?.authenticated && (() => {
           const files = allFilesRaw
             .filter((f) => isExcludedByExtension(f.filename))
             .sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
