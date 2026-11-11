@@ -15,7 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand } from '@aws-sdk/client-s3';
 
-import { requireAdmin } from '@/lib/auth';
+import { requireAuth } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 
@@ -82,7 +82,8 @@ async function uploadSlot(monthPrefix: string, slotPrefix: string, file: File): 
 export async function POST(req: NextRequest) {
   // Auth boundary. proxy.ts only does an optimistic cookie check;
   // this is what actually verifies the token and role.
-  const gate = await requireAdmin(req);
+  // Open to every signed-in role (Admin, Platform Admin and Member).
+  const gate = await requireAuth(req);
   if (gate instanceof NextResponse) return gate;
 
   try {

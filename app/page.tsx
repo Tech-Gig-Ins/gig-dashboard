@@ -741,7 +741,7 @@ function AssistantPanel({ open, onClose, page, firstName, fullName, onNavigate, 
 
   async function confirm(id: string, a: Extract<AssistantAction, { type: 'confirm' }>): Promise<boolean> {
     setCards(prev => ({ ...prev, [id]: { state: 'running' } }));
-    let uploadedName = '';
+    let uploadedNames: string[] = [];
     try {
       let res: Response;
       if (a.tool === 'grant_welfare_access') {
@@ -752,12 +752,24 @@ function AssistantPanel({ open, onClose, page, firstName, fullName, onNavigate, 
       } else if (a.tool === 'upload_attachment') {
         // Same requests as the page's own upload controls.
         const i = a.input || {};
-        const attachment = attachments.length === 1 && !i.file ? attachments[0]
-          : attachments.find(f => f.name === i.file) || attachments.find(f => f.name.toLowerCase().includes(String(i.file || '').toLowerCase()) && i.file);
-        if (!attachment) throw new Error(`the attached file ${i.file ? `"${i.file}" ` : ''}is not attached any more. Attach it again and ask once more`);
-        uploadedName = attachment.name;
+        const pick = (name?: string) => attachments.find(f => f.name === name)
+          || (name ? attachments.find(f => f.name.toLowerCase().includes(String(name).toLowerCase())) : undefined);
         const fd = new FormData();
-        if (i.destination === 'all_records') {
+        let attachment: File | undefined;
+        if (i.destination === 'billing_sources') {
+          // The server needs the CardConnect and Refresh files together.
+          const cc = pick(i.cardconnect_file), rf = pick(i.refresh_file);
+          if (!cc || !rf) throw new Error(`both source files must still be attached (${!cc ? `CardConnect "${i.cardconnect_file || '?'}" is missing` : ''}${!cc && !rf ? ', ' : ''}${!rf ? `Refresh "${i.refresh_file || '?'}" is missing` : ''}). Attach them again and ask once more`);
+          uploadedNames = [cc.name, rf.name];
+          fd.append('month', i.month); fd.append('cardconnect', cc); fd.append('refresh', rf);
+        } else {
+          attachment = attachments.length === 1 && !i.file ? attachments[0] : pick(i.file);
+          if (!attachment) throw new Error(`the attached file ${i.file ? `"${i.file}" ` : ''}is not attached any more. Attach it again and ask once more`);
+          uploadedNames = [attachment.name];
+        }
+        if (i.destination === 'billing_sources') {
+          res = await fetch('/api/billing/upload-sources', { method: 'POST', body: fd });
+        } else if (i.destination === 'all_records' && attachment) {
           const [mn, yr] = String(i.month).split(' ');
           fd.append('file', attachment);
           fd.append('canonicalLabel', i.label);
@@ -766,15 +778,12 @@ function AssistantPanel({ open, onClose, page, firstName, fullName, onNavigate, 
           if (i.if_exists === 'add_new' || i.if_exists === 'replace') fd.append('override', 'true');
           if (i.if_exists === 'replace' && i.replace_key) fd.append('overrideKey', i.replace_key);
           res = await fetch('/api/master/upload', { method: 'POST', body: fd });
-        } else if (i.destination === 'billing_chat') {
+        } else if (i.destination === 'billing_chat' && attachment) {
           fd.append('month', i.month); fd.append('name', fullName || 'Dashboard user');
           fd.append('comments', String(i.message || '')); fd.append('file', attachment);
           res = await fetch('/api/billing/updates', { method: 'POST', body: fd });
-        } else if (i.destination === 'billing_sources') {
-          fd.append('month', i.month); fd.append(i.source === 'refresh' ? 'refresh' : 'cardconnect', attachment);
-          res = await fetch('/api/billing/upload-sources', { method: 'POST', body: fd });
         } else {
-          fd.append('month', i.month); fd.append('files', attachment);
+          fd.append('month', i.month); fd.append('files', attachment as File);
           res = await fetch('/api/consultant/upload', { method: 'POST', body: fd });
         }
         if (res.status === 409) {
@@ -818,7 +827,7 @@ function AssistantPanel({ open, onClose, page, firstName, fullName, onNavigate, 
       }
       setCards(prev => ({ ...prev, [id]: { state: 'done' } }));
       setMsgs(prev => [...prev, { role: 'assistant', text: `Done: ${a.summary}${a.tool === 'set_month_inclusion' ? ` (${(d as any).changed ?? 0} file(s) changed)` : ''}.` }]);
-      if (a.tool === 'upload_attachment' && uploadedName) setAttachments(prev => prev.filter(f => f.name !== uploadedName));
+      if (a.tool === 'upload_attachment' && uploadedNames.length) setAttachments(prev => prev.filter(f => !uploadedNames.includes(f.name)));
       onChanged(a.tool, a.input, d);
       logOutcome(a.summary, 'confirmed');
       return true;
@@ -6421,21 +6430,19 @@ export default function Dashboard() {
                         return opts.map(y => <option key={y} value={y}>{y}</option>);
                       })()}
                     </select>
-                    {/* Admin only; /api/billing/upload-sources requires it. */}
-                    {canManage && (
-                      <button
-                        className="consultant-new-month-btn"
-                        onClick={() => {
-                          setBillingCardConnectFile(null);
-                          setBillingRefreshFile(null);
-                          setBillingSourcesError(null);
-                          setShowBillingUploadModal(true);
-                        }}
-                        title="Upload CardConnect + Refresh source files for this month"
-                      >
-                        Upload Files
-                      </button>
-                    )}
+                    {/* Every role can upload the sources and generate. */}
+                    <button
+                      className="consultant-new-month-btn"
+                      onClick={() => {
+                        setBillingCardConnectFile(null);
+                        setBillingRefreshFile(null);
+                        setBillingSourcesError(null);
+                        setShowBillingUploadModal(true);
+                      }}
+                      title="Upload CardConnect + Refresh source files for this month"
+                    >
+                      Upload Files
+                    </button>
                     <button
                       className="consultant-primary-btn"
                       onClick={generateBillingReport}

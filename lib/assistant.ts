@@ -179,6 +179,8 @@ function toolList(ctx: Ctx): Tool[] {
       filename: { type: 'string', description: 'what=billing_chat_file: the attached file name' },
       consultant: { type: 'string', description: 'what=consultant_sheet: consultant (tab) name' } }, ['what']));
   // Changes (always confirmed by the user)
+  // Open to every role: billing source upload and Generate.
+  tools.push(t('generate_billing_report', 'Propose running the billing reconciliation for a month from its uploaded CardConnect and Refresh source files (the Generate button on Billing). The user must confirm.', { month }, ['month']));
   tools.push(t('post_billing_message', 'Propose posting a text message (no file) in a month\'s Billing updates chat, signed with the user\'s name. The user must confirm.',
     { month, message: { type: 'string', description: 'The message, in the user\'s words' } }, ['month', 'message']));
   if (ctx.canManage) {
@@ -187,16 +189,16 @@ function toolList(ctx: Ctx): Tool[] {
     tools.push(t('approve_billing_file', 'Propose approving a file from a month\'s billing chat as that month\'s billing report (what Billing then shows). Get the file key from get_billing_chat. The user must confirm.',
       { month, key: { type: 'string', description: 'The chat file\'s s3Key from get_billing_chat' } }, ['month', 'key']));
     tools.push(t('remove_billing_approval', 'Propose removing the approved billing file for a month, so Billing shows the generated report again. The user must confirm.', { month }, ['month']));
-    tools.push(t('generate_billing_report', 'Propose running the billing reconciliation for a month from its uploaded CardConnect and Refresh source files (the Generate button on Billing). The user must confirm.', { month }, ['month']));
     tools.push(t('generate_consultant_report', 'Propose generating the consultant report and directory for a month from its uploaded inputs (the Generate button on Consultant Monthly). The user must confirm.', { month }, ['month']));
   }
   tools.push(t('upload_attachment', 'Propose uploading the file the user attached in this chat to the place they asked for. Never assume All Records: pick the destination from their request, and ask if it is unclear. The user must confirm before anything uploads.',
     { file: { type: 'string', description: 'Name of the attached file to upload, when several are attached' },
-      destination: { type: 'string', enum: ctx.canManage ? ['all_records', 'billing_chat', 'billing_sources', 'consultant'] : ['billing_chat'],
-        description: 'all_records = carrier file in All Records; billing_chat = a message with the file in the Billing (CardPointe_Refresh) updates chat; billing_sources = CardConnect or Refresh source file for billing; consultant = consultant report input file' },
+      destination: { type: 'string', enum: ctx.canManage ? ['all_records', 'billing_chat', 'billing_sources', 'consultant'] : ['billing_chat', 'billing_sources'],
+        description: 'all_records = carrier file in All Records; billing_chat = a message with the file in the Billing (CardPointe_Refresh) updates chat; billing_sources = the month\'s CardConnect AND Refresh source files, uploaded together (both are required); consultant = consultant report input file' },
       month: { ...month, description: 'Month it belongs to, "October 2026"' },
       label: { type: 'string', enum: MOVE_LABELS, description: 'all_records only: carrier label' },
-      source: { type: 'string', enum: ['cardconnect', 'refresh'], description: 'billing_sources only' },
+      cardconnect_file: { type: 'string', description: 'billing_sources only: name of the attached CardConnect (CardPointe) file' },
+      refresh_file: { type: 'string', description: 'billing_sources only: name of the attached Refresh file' },
       message: { type: 'string', description: 'billing_chat only: the message to post with the file, in the user\'s words' },
       if_exists: { type: 'string', enum: ['add_new', 'replace'], description: 'all_records only: what to do if a file with the same label and month already exists. Leave out unless the user said.' },
       replace_key: { type: 'string', description: 'all_records with if_exists=replace: exact key of the existing file to replace, from list_files' } },
@@ -641,7 +643,7 @@ async function runTool(ctx: Ctx, name: string, input: any): Promise<{ result: Re
     case 'remove_billing_approval':
     case 'generate_billing_report':
     case 'generate_consultant_report': {
-      if (name !== 'post_billing_message' && !ctx.canManage) return { result: { error: 'This user cannot do that.' } };
+      if (name !== 'post_billing_message' && name !== 'generate_billing_report' && !ctx.canManage) return { result: { error: 'This user cannot do that.' } };
       const ym = (v: unknown) => { const m = String(v || '').match(/^(\d{4})-(\d{2})$/); return m ? `${MONTHS_LONG[Number(m[2]) - 1]} ${m[1]}` : String(v || ''); };
       let summary = '';
       if (name === 'post_billing_message') {
@@ -666,7 +668,7 @@ async function runTool(ctx: Ctx, name: string, input: any): Promise<{ result: Re
     }
     case 'upload_attachment': {
       const dest = String(input?.destination || '');
-      if (dest !== 'billing_chat' && !ctx.canManage) return { result: { error: 'This user can only attach files to the billing chat.' } };
+      if (dest !== 'billing_chat' && dest !== 'billing_sources' && !ctx.canManage) return { result: { error: 'This user can only upload billing chat files and billing source files.' } };
       const [mn, yr] = String(input?.month || '').split(' ');
       if (MONTHS_LONG.indexOf(mn) < 0 || !Number(yr)) return { result: { error: 'month must look like "October 2026"' } };
       const monthLabel = `${mn} ${yr}`;
@@ -680,8 +682,10 @@ async function runTool(ctx: Ctx, name: string, input: any): Promise<{ result: Re
         if (!String(input?.message || '').trim()) return { result: { error: 'The billing chat needs a message to post with the file. Ask the user what to write.' } };
         summary = `Post ${fileName} in the ${monthLabel} billing chat with: "${String(input.message).trim().slice(0, 200)}"`;
       } else if (dest === 'billing_sources') {
-        if (input?.source !== 'cardconnect' && input?.source !== 'refresh') return { result: { error: 'Say whether it is the CardConnect or the Refresh source file.' } };
-        summary = `Upload ${fileName} as the ${input.source === 'cardconnect' ? 'CardConnect' : 'Refresh'} billing source for ${monthLabel}`;
+        if (!input?.cardconnect_file || !input?.refresh_file) {
+          return { result: { error: 'Billing sources need BOTH files attached and named: the CardConnect file and the Refresh file. Ask for whichever is missing.' } };
+        }
+        summary = `Upload ${input.cardconnect_file} (CardConnect) and ${input.refresh_file} (Refresh) as the billing sources for ${monthLabel}, replacing that month's current source files`;
       } else if (dest === 'consultant') {
         summary = `Upload ${fileName} as a consultant report input for ${monthLabel}`;
       } else {

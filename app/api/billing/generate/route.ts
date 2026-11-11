@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
-import { requireAdmin } from '@/lib/auth';
+import { requireAuth } from '@/lib/auth';
 const REGION = process.env.MY_AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RAW_BUCKET || 'gig-remittance-raw-prod';
 const FUNCTION_NAME = process.env.BILLING_LAMBDA_NAME || 'reconcile-billing';
@@ -77,7 +77,8 @@ function monthToPrefix(label: string): string | null {
 export async function POST(req: NextRequest) {
   // Auth boundary. proxy.ts only does an optimistic cookie check;
   // this is what actually verifies the token and role.
-  const gate = await requireAdmin(req);
+  // Open to every signed-in role (Admin, Platform Admin and Member).
+  const gate = await requireAuth(req);
   if (gate instanceof NextResponse) return gate;
 
   try {
