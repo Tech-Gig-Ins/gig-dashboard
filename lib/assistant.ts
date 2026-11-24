@@ -133,7 +133,7 @@ function toolList(ctx: Ctx): Tool[] {
           group: { type: 'string' }, planName: { type: 'string' }, state: { type: 'string' }, city: { type: 'string' },
           file: { type: 'string', description: 'Carrier file label' }, sourceSystem: { type: 'string' }, coverageTier: { type: 'string' } } } }, ['page']),
     t('master_overview', 'Master Dashboard totals: active, terminated and new member counts, months covered, and carrier files missing for the latest months.'),
-    t('search_master', 'Search Master Dashboard members by name (any word order) and optional filters. Returns the full record of up to 50 matching members (name, group, plan, Anthem ID, payment, address, city, state, email, phone, carrier file, source system, coverage tier, and termination or effective date) and the total match count.',
+    t('search_master', 'Search Master Dashboard members. "search" matches MEMBER NAMES only (any word order); to find the members of a company or group, put its name in filters.group (partial names match). If a name search finds nothing, it is retried automatically as a group name. Returns the full record of up to 50 matching members (name, group, plan, Anthem ID, payment, address, city, state, email, phone, carrier file, source system, coverage tier, and termination or effective date) and the total match count.',
       { search: { type: 'string', description: 'Name words to search for; may be empty when only filtering' },
         table: { type: 'string', enum: ['active', 'terminated', 'new'], description: 'Which table, default active' },
         filters: { type: 'object', description: 'Optional exact filters', properties: {
@@ -405,12 +405,21 @@ async function runTool(ctx: Ctx, name: string, input: any): Promise<{ result: Re
     case 'search_master': {
       const s = await api(ctx, '/api/master?view=summary');
       if (s.error) return { result: s };
-      const p = await api(ctx, '/api/master/query', {
+      const query = (search: string, filters: any) => api(ctx, '/api/master/query', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ fp: s.fingerprint, table: input?.table || 'active', search: String(input?.search || ''),
-          filters: { ...EMPTY_FILTERS, ...(input?.filters || {}) }, sort: null, page: 1, pageSize: 50 }),
+        body: JSON.stringify({ fp: s.fingerprint, table: input?.table || 'active', search,
+          filters: { ...EMPTY_FILTERS, ...filters }, sort: null, page: 1, pageSize: 50 }),
       });
+      let p = await query(String(input?.search || ''), input?.filters || {});
       if (p.error) return { result: p };
+      // A company typed into the name search ("Groundwork Therapy") matches no
+      // member names. Retry it as a group, so the members are still found.
+      let matchedBy = 'member name';
+      const hasFilters = Object.values(input?.filters || {}).some(v => typeof v === 'string' && v.trim());
+      if (!p.matched && String(input?.search || '').trim() && !hasFilters) {
+        const g = await query('', { group: String(input.search).trim() });
+        if (!g.error && g.matched) { p = g; matchedBy = 'group name'; }
+      }
       // The full record, exactly as the Master tables show it ('-' means empty there).
       const pick = (r: any) => ({
         name: r.memberName, group: r.group, plan: r.planName, anthemId: r.anthemId, payment: r.payment,
@@ -419,7 +428,7 @@ async function runTool(ctx: Ctx, name: string, input: any): Promise<{ result: Re
         ...(r.terminationDate ? { terminationDate: r.terminationDate } : {}),
         ...(r.effectiveDate ? { effectiveDate: r.effectiveDate } : {}),
       });
-      return { result: shrink({ matched: p.matched, totalInTable: p.total, showing: p.rows.length, rows: p.rows.map(pick) }) };
+      return { result: shrink({ matched: p.matched, matchedBy, totalInTable: p.total, showing: p.rows.length, rows: p.rows.map(pick) }) };
     }
     case 'search_all_records': {
       const r = await api(ctx, `/api/search?q=${q(String(input?.query || ''))}`);
@@ -781,6 +790,10 @@ function systemPrompt(ctx: Ctx, page: string): string {
     '  feeds Master and the Consultant report). "excluded", "not included", "not counted": the opposite. Use',
     '  list_files with included=true or false.',
     '- "remittance" / "credits": carrier labels (Cassena Remittance, Cassena Credits, and so on); use list_files label.',
+    '- "price from Refresh", "Refresh price": the Price column of the Refresh file in All Records for that month',
+    '  (search_all_records for the member names, or list_files label Refresh, then read_file). The Billing report',
+    '  also shows Refresh prices once that month has been generated.',
+    '- A company or group name (e.g. "Groundwork Therapy") is a GROUP: use search_master with filters.group.',
     '- "this month", "last month", "next month": relative to today\'s date above. "received", "came in", "arrived":',
     '  by arrival date (received_month); "October files", "files for October": the month block (file_month).',
     '- "active", "terminated", "new": the three Master tables. "members", "clients", "enrollees": people in Master.',
@@ -808,6 +821,12 @@ function systemPrompt(ctx: Ctx, page: string): string {
     '- Step 3: answer with the right specific tools, checking sources in the priority order for the topic below, and',
     '  say which source each fact or number came from.',
     '- Never answer "none" or 0 from one source when another part of the dashboard has it.',
+    '- Never calculate or estimate a number that is not in the tool results (no averages, per-member prices or',
+    '  totals of your own) unless the user asks for that calculation; then show how you worked it out.',
+    '- If a source has no data for the month asked (for example "No reconciliation output" for the billing report),',
+    '  say so plainly and check the latest month that does have data, saying which month you used.',
+    '- A member\'s plan, tier and payment come from their Master row (search_master). Never give a plan to a person',
+    '  unless that person\'s own row in this turn\'s results shows it.',
     '',
     'Priority order by topic (check them in this order; use all that apply):',
     '- Money (pay, paid, payment, premium, price, fee, charge, cost, amount, owe, billed, collected, declined):',
@@ -936,14 +955,18 @@ export async function runAssistant(opts: {
   const actions: AssistantAction[] = [];
   const trace: TraceItem[] = [];
   let retriedNav = false;
+  let retriedLookup = false;
+  let forceTool = false;
   for (let step = 0; step < MAX_STEPS; step++) {
     const res = await bedrock.send(new ConverseCommand({
       modelId,
       system: [{ text: systemPrompt(ctx, opts.page) }],
       messages,
-      toolConfig: { tools },
+      // forceTool: the model MUST call a tool on this step (no answering from memory).
+      toolConfig: forceTool ? { tools, toolChoice: { any: {} } } : { tools },
       inferenceConfig: { maxTokens: 2000, temperature: 0 },
     }));
+    forceTool = false;
     const out = res.output?.message;
     if (!out) break;
     messages.push(out);
@@ -955,6 +978,16 @@ export async function runAssistant(opts: {
       if (claimsNav && !actions.some(a => a.type === 'navigate') && !retriedNav) {
         retriedNav = true;
         messages.push({ role: 'user', content: [{ text: 'You said you opened something, but you did not call navigate in this turn, so nothing changed on screen. Call navigate now with the right page, month and sheet, then reply.' }] });
+        continue;
+      }
+      // Guard: an answer containing data (names in a table, amounts, counts,
+      // plans) but with NO lookups this turn was made up from earlier messages.
+      // Send it back once, and require a tool call, so it is answered from data.
+      const looksLikeData = /\|.*\|/.test(reply) || /\$\s?\d/.test(reply) || /\b\d{2,}\b/.test(reply) || /\bplan\b/i.test(reply);
+      if (trace.length === 0 && looksLikeData && !retriedLookup) {
+        retriedLookup = true;
+        forceTool = true;
+        messages.push({ role: 'user', content: [{ text: 'You answered without looking anything up in this turn. Earlier messages hold only text, not data, so that answer may be wrong. Look the data up now with the tools, then answer only from what they return.' }] });
         continue;
       }
       return { reply: reply || 'Done.', actions, trace };
@@ -984,7 +1017,8 @@ function describeLookup(name: string, input: any, result: any): TraceItem {
       const f = input?.filters ? Object.entries(input.filters).filter(([, v]) => v).map(([k]) => k) : [];
       label = `Searched Master (${tableName[input?.table || 'active'] || input?.table})` +
         (input?.search ? ` for "${input.search}"` : '') + (f.length ? `, filters: ${f.join(', ')}` : '') +
-        (r && typeof r.matched === 'number' ? `: ${r.matched} match${r.matched === 1 ? '' : 'es'}` : '');
+        (r && typeof r.matched === 'number' ? `: ${r.matched} match${r.matched === 1 ? '' : 'es'}` : '') +
+        (r?.matchedBy === 'group name' ? ' (matched as a group)' : '');
       break;
     }
     case 'search_all_records':
